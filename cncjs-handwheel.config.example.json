@@ -7,19 +7,19 @@
     "socketPort": 8000
   },
   "device": {
-    "path": "/dev/pendant",
+    "path": "/dev/ttyACM0",
     "baudRate": 115200,
     "reconnectMs": 3000,
     "settleMs": 2000,
     "hupcl": false,
     "dtr": null,
-    "rts": null    
+    "rts": null
   },
   "status": {
     "format": "grbl",
-    "rateHz": 5,
-    "heartbeatMs": 1000,
-    "decimals": 3
+    "intervalMs": 100,
+    "minGapMs": 25,
+    "pollAfterCommand": true
   },
   "http": { "enabled": true, "host": "127.0.0.1", "port": 8001 },
   "jog": { "translate": true },

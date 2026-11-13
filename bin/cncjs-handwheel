@@ -4,8 +4,8 @@
 // CNCjs <-> ESP32 pendant bridge.
 //   pendant -> CNCjs : gcode lines (and a few realtime chars) read from the pendant's serial port
 //   CNCjs -> pendant : status lines (state, MPos, WPos, feed/spindle) written to the pendant
-// Health/status of both links is exposed as JSON on http://127.0.0.1:8001/status (configurable).
-
+//   Health/status of both links is exposed as JSON on http://127.0.0.1:8001/status (configurable).
+//   Pendant logs can be accessed on http://127.0.0.1:8001/logs (configurable)
 
 const fs = require('fs');
 const os = require('os');
@@ -32,6 +32,7 @@ const DEFAULTS = {
         baudRate: 115200,
         reconnectMs: 3000,
         settleMs: 2000,            // ignore pendant input this long after opening the port
+
         // Modem-control lines. The CH340 + auto-reset transistors wire DTR/RTS to EN/IO0, so on Linux
         // the DTR/RTS toggling around open/close can reset the ESP32 or drop it into download mode.
         hupcl: false,              // do NOT drop DTR/RTS when the port is closed
@@ -40,17 +41,22 @@ const DEFAULTS = {
     },
     status: {
         format: 'grbl',            // 'grbl' -> <Idle|MPos:..|WPos:..|FS:..>   'json' -> {"t":"status",...}
-        rateHz: 5,                 // max status updates per second (only sent when changed)
-        heartbeatMs: 1000,         // resend status at least this often so the pendant can detect a dead host
+        intervalMs: 100,           // unsolicited status line at least this often (also the pendant's "host alive" signal)
+        minGapMs: 25,              // minimum gap between two status lines when the values change
+        pollAfterCommand: true,    // ask CNCjs/Grbl for a fresh status report after every pendant command
         decimals: 3
     },
     http: { enabled: true, host: '127.0.0.1', port: 8001 },
+    
     // Grbl 1.1 only: rewrite "G21G91X+10F2000" into "$J=G21G91X+10F2000" so a pendant jog does not
     // leave CNCjs/Grbl stuck in relative mode (and so jogs go through Grbl's jog queue)
     jog: { translate: true },
+    
     // pendant console lines ("; ...") are kept here for the widget instead of being sent to Grbl
     log: { max: 500 },
-    verbose: false
+
+    verbose: false,            // -v: log pendant events and commands
+    trace: false               // --trace: also log all controller traffic (everything CNCjs reads/writes)
 };
 
 // ---------------------------------------------------------------- config
@@ -68,7 +74,8 @@ program
     .option('--socket-port <port>', 'CNCjs port')
     .option('--pendant-port <path>', 'serial port of the pendant')
     .option('--pendant-baudrate <baudrate>', 'baud rate of the pendant')
-    .option('-v, --verbose', 'log traffic');
+    .option('-v, --verbose', 'log pendant events and the commands sent to CNCjs')
+    .option('--trace', 'also log all controller traffic (very noisy)');
 program.parse(process.argv);
 const cli = program.opts();
 
@@ -108,11 +115,10 @@ if (cli.socketPort) cfg.cncjs.socketPort = cli.socketPort;
 if (cli.pendantPort) cfg.device.path = cli.pendantPort;
 if (cli.pendantBaudrate) cfg.device.baudRate = cli.pendantBaudrate;
 if (cli.verbose) cfg.verbose = true;
+if (cli.trace) cfg.trace = true;
 
 if (!cfg.cncjs.port) { console.error('Missing CNC controller port (cncjs.port / --port)'); process.exit(1); }
 if (!cfg.device.path) { console.error('Missing pendant port (device.path / --pendant-port). Try --list'); process.exit(1); }
-
-
 
 // ---------------------------------------------------------------- state
 const store = { controller: { state: {}, settings: {} }, sender: { status: {} } };
@@ -130,7 +136,7 @@ const log = (...args) => cfg.verbose && console.log(...args);
 let shuttingDown = false;
 
 // ---------------------------------------------------------------- CNCjs side
-const cncOpts = Object.assign({}, cfg.cncjs, { secret: cli.secret, verbose: cfg.verbose });
+const cncOpts = Object.assign({}, cfg.cncjs, { secret: cli.secret, verbose: cfg.trace });
 const socket = connectToCncjs(cncOpts, (err) => {
     if (err) {
         health.cncjs.lastError = err.message;
@@ -147,6 +153,9 @@ socket.on('serialport:close', () => { health.cncjs.portOpen = false; });
     let dumped = false;
     socket.on(type + ':state', (state) => {
         store.controller.state = state || {};
+        const wco = state && state.status && state.status.wco;
+        if (wco) lastWco = wco;
+        sendStatus(false); // forward changes right away (rate limited by status.minGapMs)
         if (cfg.verbose && !dumped) { dumped = true; console.log(type + ':state sample', JSON.stringify(state)); }
     });
     socket.on(type + ':settings', (settings) => { store.controller.settings = settings || {}; });
@@ -154,17 +163,33 @@ socket.on('serialport:close', () => { health.cncjs.portOpen = false; });
 
 socket.on('sender:status', (data) => { store.sender.status = data || {}; });
 
+let lastWco = null; // Grbl 1.1 only reports MPos *or* WPos, plus WCO now and then: WPos = MPos - WCO
 const cncReady = () => health.cncjs.socketConnected && health.cncjs.portOpen;
 
 function sendCommand(name, ...args) {
     if (!cncReady()) {
         sendToPendant('ERR:CNCJS_NOT_READY');
+        sendStatus(true);
         return false;
     }
     health.lastCommand = { at: Date.now(), name, args };
     log('pendant ->', name, ...args);
     socket.emit('command', cfg.cncjs.port, name, ...args);
+    answerCommand();
     return true;
+}
+
+// Every command from the pendant is answered with a status line right away. The position in it is
+// what CNCjs knew at that moment; a fresh report is requested so the real position follows within
+// a few tens of ms (forwarded by the :state handler).
+let lastPoll = 0;
+function answerCommand() {
+    sendStatus(true);
+    const now = Date.now();
+    if (cfg.status.pollAfterCommand && now - lastPoll >= 50) {
+        lastPoll = now;
+        socket.emit('command', cfg.cncjs.port, 'statusreport');
+    }
 }
 
 // ---------------------------------------------------------------- pendant -> CNCjs
@@ -187,7 +212,7 @@ function addPendantLog(text) {
     logBuf.push({ id: ++logSeq, t: Date.now(), text });
     if (logBuf.length > cfg.log.max) logBuf.splice(0, logBuf.length - cfg.log.max);
     health.pendant.logLines = logSeq;
-    log('pendant log:', text);
+    log('pendant -> log:', text);
 }
 
 const PRINTABLE = /^[\x20-\x7e]+$/;
@@ -276,15 +301,29 @@ function onPendantLine(raw) {
 }
 
 // ---------------------------------------------------------------- CNCjs -> pendant
+const num = (v) => Number(v) || 0;
+const sub = (a, b) => ({ x: num(a.x) - num(b.x), y: num(a.y) - num(b.y), z: num(a.z) - num(b.z) });
+const add = (a, b) => ({ x: num(a.x) + num(b.x), y: num(a.y) + num(b.y), z: num(a.z) + num(b.z) });
+
+function positions(st) {
+    const wco = st.wco || lastWco;
+    let mpos = st.mpos || null;
+    let wpos = st.wpos || null;
+    if (!wpos && mpos && wco) wpos = sub(mpos, wco);
+    if (!mpos && wpos && wco) mpos = add(wpos, wco);
+    return { mpos, wpos };
+}
+
 function snapshot() {
     const connected = cncReady();
     const st = (store.controller.state && store.controller.state.status) || {};
+    const pos = positions(st);
     const snd = store.sender.status || {};
     return {
         connected,
         state: connected ? (st.activeState || 'Unknown') : 'Disconnected',
-        mpos: st.mpos || null,
-        wpos: st.wpos || null,
+        mpos: pos.mpos,
+        wpos: pos.wpos,
         feed: st.feedrate !== undefined ? st.feedrate : null,
         spindle: st.spindle !== undefined ? st.spindle : null,
         sender: { name: snd.name || null, total: snd.total || 0, sent: snd.sent || 0,
@@ -309,21 +348,25 @@ function formatStatus(s) {
 
 let lastLine = '';
 let lastStatusAt = 0;
+let lastLogged = 0;
 
 function sendStatus(force) {
     const line = formatStatus(snapshot());
     const now = Date.now();
-    if (force || line !== lastLine || now - lastStatusAt >= cfg.status.heartbeatMs) {
-        if (sendToPendant(line)) {
+    const due = now - lastStatusAt >= cfg.status.intervalMs;
+    const changed = line !== lastLine && now - lastStatusAt >= cfg.status.minGapMs;
+    if (force || due || changed) {
+        if (sendToPendant(line, changed)) {
             lastLine = line;
             lastStatusAt = now;
         }
     }
 }
 
-function sendToPendant(text) {
+function sendToPendant(text, should_log=false) {
     const port = pendantPort;
     if (!port || !port.isOpen) return false;
+    if(should_log) log('cncjs -> ', 'pendant', text);
     port.write(text + '\n', (err) => {
         if (err) noteError(err);
     });
