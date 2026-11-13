@@ -1,0 +1,16 @@
+{
+  "name": "cncjs-handwheel",
+  "version": "0.1.0",
+  "description": "CNCjs pendant bridge for a serial (USB/Bluetooth) ESP32 CNC handwheel",
+  "main": "index.js",
+  "bin": { "cncjs-handwheel": "bin/cncjs-handwheel" },
+  "engines": { "node": ">=20" },
+  "license": "MIT",
+  "dependencies": {
+    "commander": "^9.5.0",
+    "jsonwebtoken": "^9.0.0",
+    "lodash.get": "^4.4.2",
+    "serialport": "^13.0.0",
+    "socket.io-client": "^2.5.0"
+  }
+}

@@ -1,0 +1,473 @@
+#!/usr/bin/env node
+'use strict';
+
+// CNCjs <-> ESP32 pendant bridge.
+//   pendant -> CNCjs : gcode lines (and a few realtime chars) read from the pendant's serial port
+//   CNCjs -> pendant : status lines (state, MPos, WPos, feed/spindle) written to the pendant
+// Health/status of both links is exposed as JSON on http://127.0.0.1:8001/status (configurable).
+
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+const http = require('http');
+const { Command } = require('commander');
+const { SerialPort } = require('serialport');
+const connectToCncjs = require('../index');
+const pkg = require('../package.json');
+
+const DEFAULT_CONFIG_FILE = path.join(os.homedir(), '.cncjs-handwheel.json');
+
+const DEFAULTS = {
+    cncjs: {
+        port: '/dev/ttyUSB0',      // CNC controller port AS KNOWN TO CNCjs (e.g. /dev/ttyUSB0), NOT the pendant
+        baudrate: 115200,
+        controllerType: 'Grbl',    // Grbl | Smoothie (TinyG: state is not mapped yet)
+        socketAddress: '127.0.0.1',
+        socketPort: 8000,
+        accessTokenLifetime: '30d'
+    },
+    device: {
+        path: '/dev/ttyUSB1',      // the pendant's serial port (e.g. /dev/ttyACM0 or /dev/rfcomm0)
+        baudRate: 115200,
+        reconnectMs: 3000
+    },
+    status: {
+        format: 'grbl',            // 'grbl' -> <Idle|MPos:..|WPos:..|FS:..>   'json' -> {"t":"status",...}
+        rateHz: 5,                 // max status updates per second (only sent when changed)
+        heartbeatMs: 1000,         // resend status at least this often so the pendant can detect a dead host
+        decimals: 3
+    },
+    http: { enabled: true, host: '127.0.0.1', port: 8001 },
+    // Grbl 1.1 only: rewrite "G21G91X+10F2000" into "$J=G21G91X+10F2000" so a pendant jog does not
+    // leave CNCjs/Grbl stuck in relative mode (and so jogs go through Grbl's jog queue)
+    jog: { translate: true },
+    verbose: false
+};
+
+
+
+
+
+
+
+
+
+// ---------------------------------------------------------------- config
+const program = new Command();
+program
+    .name('cncjs-handwheel')
+    .version(pkg.version)
+    .option('-l, --list', 'list available serial ports then exit')
+    .option('-c, --config <file>', 'config file (default: ' + DEFAULT_CONFIG_FILE + ' if present)')
+    .option('-s, --secret <secret>', 'CNCjs secret (default: $CNCJS_SECRET or ~/.cncrc)')
+    .option('-p, --port <port>', 'CNC controller port as known to CNCjs, e.g. /dev/ttyUSB0')
+    .option('-b, --baudrate <baudrate>', 'CNC controller baud rate')
+    .option('--controller-type <type>', 'Grbl|Smoothie')
+    .option('--socket-address <address>', 'CNCjs host')
+    .option('--socket-port <port>', 'CNCjs port')
+    .option('--pendant-port <path>', 'serial port of the pendant')
+    .option('--pendant-baudrate <baudrate>', 'baud rate of the pendant')
+    .option('-v, --verbose', 'log traffic');
+program.parse(process.argv);
+const cli = program.opts();
+
+const isObj = (v) => v && typeof v === 'object' && !Array.isArray(v);
+const deepMerge = (base, extra) => {
+    const out = Object.assign({}, base);
+    Object.keys(extra || {}).forEach((k) => {
+        out[k] = isObj(extra[k]) && isObj(base[k]) ? deepMerge(base[k], extra[k]) : extra[k];
+    });
+    return out;
+};
+
+if (cli.list) {
+    SerialPort.list().then((ports) => {
+        ports.forEach((p) => console.log([p.path, p.manufacturer, p.vendorId && (p.vendorId + ':' + p.productId)]
+            .filter(Boolean).join('  ')));
+    }).catch((err) => { console.error(err); process.exit(1); });
+    return;
+}
+
+// precedence (low -> high): defaults, "pendant" section of ~/.cncrc, config file, CLI
+let cfg = deepMerge(DEFAULTS, connectToCncjs.readCncrc().pendant);
+const cfgFile = cli.config || (fs.existsSync(DEFAULT_CONFIG_FILE) ? DEFAULT_CONFIG_FILE : null);
+if (cfgFile) {
+    try {
+        cfg = deepMerge(cfg, JSON.parse(fs.readFileSync(cfgFile, 'utf8')));
+    } catch (err) {
+        console.error('Cannot read config file ' + cfgFile + ': ' + err.message);
+        process.exit(1);
+    }
+}
+if (cli.port) cfg.cncjs.port = cli.port;
+if (cli.baudrate) cfg.cncjs.baudrate = cli.baudrate;
+if (cli.controllerType) cfg.cncjs.controllerType = cli.controllerType;
+if (cli.socketAddress) cfg.cncjs.socketAddress = cli.socketAddress;
+if (cli.socketPort) cfg.cncjs.socketPort = cli.socketPort;
+if (cli.pendantPort) cfg.device.path = cli.pendantPort;
+if (cli.pendantBaudrate) cfg.device.baudRate = cli.pendantBaudrate;
+if (cli.verbose) cfg.verbose = true;
+
+if (!cfg.cncjs.port) { console.error('Missing CNC controller port (cncjs.port / --port)'); process.exit(1); }
+if (!cfg.device.path) { console.error('Missing pendant port (device.path / --pendant-port). Try --list'); process.exit(1); }
+
+// ---------------------------------------------------------------- state
+const store = { controller: { state: {}, settings: {} }, sender: { status: {} } };
+
+const health = {
+    startedAt: Date.now(),
+    pendant: { path: cfg.device.path, connected: false, lastRx: null, lastTx: null, rxLines: 0, txLines: 0,
+        reconnects: 0, errors: 0, lastError: null },
+    cncjs: { socketConnected: false, portOpen: false, port: cfg.cncjs.port, controllerType: cfg.cncjs.controllerType,
+        lastError: null },
+    lastCommand: null
+};
+
+const log = (...args) => cfg.verbose && console.log(...args);
+let shuttingDown = false;
+
+// ---------------------------------------------------------------- CNCjs side
+const cncOpts = Object.assign({}, cfg.cncjs, { secret: cli.secret, verbose: cfg.verbose });
+const socket = connectToCncjs(cncOpts, (err) => {
+    if (err) {
+        health.cncjs.lastError = err.message;
+        console.error(err.message);
+    }
+});
+
+socket.on('connect', () => { health.cncjs.socketConnected = true; });
+socket.on('disconnect', () => { health.cncjs.socketConnected = false; health.cncjs.portOpen = false; });
+socket.on('serialport:open', () => { health.cncjs.portOpen = true; health.cncjs.lastError = null; });
+socket.on('serialport:close', () => { health.cncjs.portOpen = false; });
+
+['Grbl', 'Smoothie', 'TinyG'].forEach((type) => {
+    let dumped = false;
+    socket.on(type + ':state', (state) => {
+        store.controller.state = state || {};
+        if (cfg.verbose && !dumped) { dumped = true; console.log(type + ':state sample', JSON.stringify(state)); }
+    });
+    socket.on(type + ':settings', (settings) => { store.controller.settings = settings || {}; });
+});
+socket.on('sender:status', (data) => { store.sender.status = data || {}; });
+
+const cncReady = () => health.cncjs.socketConnected && health.cncjs.portOpen;
+
+function sendCommand(name, ...args) {
+    if (!cncReady()) {
+        sendToPendant('ERR:CNCJS_NOT_READY');
+        return false;
+    }
+    health.lastCommand = { at: Date.now(), name, args };
+    log('pendant ->', name, ...args);
+    socket.emit('command', cfg.cncjs.port, name, ...args);
+    return true;
+}
+
+// ---------------------------------------------------------------- pendant -> CNCjs
+// Realtime characters act immediately (even without a newline), like Grbl:
+//   !  feed hold    ~  cycle start    ^X (0x18)  soft reset    ?  status request
+// Everything else is collected into lines and sent as gcode.
+// Meta lines:  PING -> PONG,  STATUS? -> immediate status line.
+let rxBuf = '';
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+function onPendantData(buf) {
+    health.pendant.lastRx = Date.now();
+    const text = buf.toString('binary');
+    for (let i = 0; i < text.length; i++) {
+        const ch = text[i];
+        if (ch === '!') sendCommand('feedhold');
+        else if (ch === '~') sendCommand('cyclestart');
+        else if (ch === '\x18') sendCommand('reset');
+        else if (ch === '?') sendStatus(true);
+        else if (ch === '\n' || ch === '\r') {
+            const line = rxBuf.trim();
+            rxBuf = '';
+            if (line) onPendantLine(line);
+        } else if (rxBuf.length < 256) {
+            rxBuf += ch;
+        }
+    }
+}
+
+// Only modal words (G20/G21/G90/G91), axis words and a feed, no G0/G1/G2/G3 -> this is a jog.
+const JOG_RE = /^(?:G(?:20|21|90|91))+(?:[XYZABC][-+]?\d*\.?\d+|F\d*\.?\d+)+$/;
+
+function toJog(line) {
+    const compact = line.replace(/\s+/g, '').toUpperCase();
+    return JOG_RE.test(compact) && /[XYZABC]/.test(compact) ? '$J=' + compact : line;
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+function onPendantLine(line) {
+    health.pendant.rxLines++;
+    const upper = line.toUpperCase();
+    if (upper === 'PING') return sendToPendant('PONG');
+    if (upper === 'STATUS?') return sendStatus(true);
+    if (cfg.jog.translate && cfg.cncjs.controllerType === 'Grbl') {
+        line = toJog(line);
+    }
+    sendCommand('gcode', line);
+}
+
+// ---------------------------------------------------------------- CNCjs -> pendant
+function snapshot() {
+    const connected = cncReady();
+    const st = (store.controller.state && store.controller.state.status) || {};
+    const snd = store.sender.status || {};
+    return {
+        connected,
+        state: connected ? (st.activeState || 'Unknown') : 'Disconnected',
+        mpos: st.mpos || null,
+        wpos: st.wpos || null,
+        feed: st.feedrate !== undefined ? st.feedrate : null,
+        spindle: st.spindle !== undefined ? st.spindle : null,
+        sender: { name: snd.name || null, total: snd.total || 0, sent: snd.sent || 0,
+            received: snd.received || 0, hold: !!snd.hold }
+    };
+}
+
+function formatStatus(s) {
+    if (cfg.status.format === 'json') {
+        return JSON.stringify(Object.assign({ t: 'status' }, s));
+    }
+    const d = cfg.status.decimals;
+    const pos = (p) => [p.x, p.y, p.z].map((n) => (Number(n) || 0).toFixed(d)).join(',');
+    const parts = [s.state];
+    if (s.connected) {
+        if (s.mpos) parts.push('MPos:' + pos(s.mpos));
+        if (s.wpos) parts.push('WPos:' + pos(s.wpos));
+        if (s.feed !== null) parts.push('FS:' + (Number(s.feed) || 0) + ',' + (Number(s.spindle) || 0));
+    }
+    return '<' + parts.join('|') + '>';
+}
+
+let lastLine = '';
+let lastStatusAt = 0;
+
+function sendStatus(force) {
+    const line = formatStatus(snapshot());
+    const now = Date.now();
+    if (force || line !== lastLine || now - lastStatusAt >= cfg.status.heartbeatMs) {
+        if (sendToPendant(line)) {
+            lastLine = line;
+            lastStatusAt = now;
+        }
+    }
+}
+
+function sendToPendant(text) {
+    const port = pendantPort;
+    if (!port || !port.isOpen) return false;
+    port.write(text + '\n', (err) => {
+        if (err) noteError(err);
+    });
+    health.pendant.lastTx = Date.now();
+    health.pendant.txLines++;
+    return true;
+}
+
+const statusTimer = setInterval(() => sendStatus(false), Math.max(20, Math.round(1000 / cfg.status.rateHz)));
+
+// ---------------------------------------------------------------- pendant serial link
+let pendantPort = null;
+let reconnectTimer = null;
+
+function noteError(err) {
+    health.pendant.errors++;
+    health.pendant.lastError = err.message;
+    console.error('Pendant error:', err.message);
+}
+
+function scheduleReconnect() {
+    if (shuttingDown || reconnectTimer) return;
+    reconnectTimer = setTimeout(() => {
+        reconnectTimer = null;
+        health.pendant.reconnects++;
+        openPendant();
+    }, cfg.device.reconnectMs);
+}
+
+function openPendant() {
+    const port = new SerialPort({
+            path: cfg.device.path,
+            baudRate: Number(cfg.device.baudRate),
+            autoOpen: false,
+            dataBits: 8,
+            stopBits: 1,
+            parity: 'none',
+            rtscts: false,
+            xon: false,
+            xoff: false,
+            xany: false,
+            hupcl: !!cfg.device.hupcl
+        });
+
+    pendantPort = port;
+    port.on('data', onPendantData);
+    port.on('error', noteError);
+    port.on('close', () => {
+        health.pendant.connected = false;
+        if (!shuttingDown) console.log('Pendant port closed');
+        scheduleReconnect();
+    });
+    port.open((err) => {
+        if (err) {
+            noteError(err);
+            scheduleReconnect();
+            return;
+        }
+        rxBuf = '';
+        health.pendant.connected = true;
+        health.pendant.lastError = null;
+        console.log('Pendant connected on ' + cfg.device.path + ', baudrate: ' + cfg.device.baudRate);
+        sendStatus(true);
+    });
+}
+
+// ---------------------------------------------------------------- health endpoint
+function healthReport() {
+    const now = Date.now();
+    const age = (t) => (t ? now - t : null);
+    return {
+        ok: health.pendant.connected && cncReady(),
+        version: pkg.version,
+        uptimeMs: now - health.startedAt,
+        pendant: Object.assign({}, health.pendant, { lastRxAgeMs: age(health.pendant.lastRx),
+            lastTxAgeMs: age(health.pendant.lastTx) }),
+        cncjs: health.cncjs,
+        lastCommand: health.lastCommand,
+        status: snapshot()
+    };
+}
+
+let httpServer = null;
+if (cfg.http.enabled) {
+    httpServer = http.createServer((req, res) => {
+        if (req.url === '/' || req.url === '/status') {
+            res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+            res.end(JSON.stringify(healthReport()));
+        } else {
+            res.writeHead(404);
+            res.end();
+        }
+    });
+    httpServer.on('error', (err) => console.error('Health endpoint error:', err.message));
+    httpServer.listen(cfg.http.port, cfg.http.host, () =>
+        console.log('Health endpoint on http://' + cfg.http.host + ':' + cfg.http.port + '/status'));
+}
+
+// ---------------------------------------------------------------- lifecycle
+function shutdown() {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    clearInterval(statusTimer);
+    clearTimeout(reconnectTimer);
+    socket.close();
+    if (httpServer) httpServer.close();
+    if (pendantPort && pendantPort.isOpen) pendantPort.close();
+    setTimeout(() => process.exit(0), 300);
+}
+process.on('SIGINT', shutdown);
+process.on('SIGTERM', shutdown);
+
+openPendant();

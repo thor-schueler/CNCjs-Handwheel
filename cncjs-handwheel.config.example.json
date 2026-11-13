@@ -1,0 +1,23 @@
+{
+  "cncjs": {
+    "port": "/dev/ttyUSB0",
+    "baudrate": 115200,
+    "controllerType": "Grbl",
+    "socketAddress": "localhost",
+    "socketPort": 8000
+  },
+  "device": {
+    "path": "/dev/pendant",
+    "baudRate": 115200,
+    "reconnectMs": 3000
+  },
+  "status": {
+    "format": "grbl",
+    "rateHz": 5,
+    "heartbeatMs": 1000,
+    "decimals": 3
+  },
+  "http": { "enabled": true, "host": "127.0.0.1", "port": 8001 },
+  "jog": { "translate": true },
+  "log": { "max": 500 }
+}
