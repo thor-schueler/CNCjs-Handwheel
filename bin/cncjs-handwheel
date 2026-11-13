@@ -6,6 +6,7 @@
 //   CNCjs -> pendant : status lines (state, MPos, WPos, feed/spindle) written to the pendant
 // Health/status of both links is exposed as JSON on http://127.0.0.1:8001/status (configurable).
 
+
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
@@ -15,21 +16,27 @@ const { SerialPort } = require('serialport');
 const connectToCncjs = require('../index');
 const pkg = require('../package.json');
 
-const DEFAULT_CONFIG_FILE = path.join(os.homedir(), '.cncjs-handwheel.json');
+const DEFAULT_CONFIG_FILE = path.join(os.homedir(), '.cncjs-handwheel.config');
 
 const DEFAULTS = {
     cncjs: {
-        port: '/dev/ttyUSB0',      // CNC controller port AS KNOWN TO CNCjs (e.g. /dev/ttyUSB0), NOT the pendant
+        port: null,                // CNC controller port AS KNOWN TO CNCjs (e.g. /dev/ttyUSB0), NOT the pendant
         baudrate: 115200,
         controllerType: 'Grbl',    // Grbl | Smoothie (TinyG: state is not mapped yet)
-        socketAddress: '127.0.0.1',
+        socketAddress: 'localhost',
         socketPort: 8000,
         accessTokenLifetime: '30d'
     },
     device: {
-        path: '/dev/ttyUSB1',      // the pendant's serial port (e.g. /dev/ttyACM0 or /dev/rfcomm0)
+        path: '/dev/pendant',      // the pendant's serial port (e.g. /dev/ttyACM0 or /dev/rfcomm0)
         baudRate: 115200,
-        reconnectMs: 3000
+        reconnectMs: 3000,
+        settleMs: 2000,            // ignore pendant input this long after opening the port
+        // Modem-control lines. The CH340 + auto-reset transistors wire DTR/RTS to EN/IO0, so on Linux
+        // the DTR/RTS toggling around open/close can reset the ESP32 or drop it into download mode.
+        hupcl: false,              // do NOT drop DTR/RTS when the port is closed
+        dtr: null,                 // true/false = force DTR right after open, null = leave alone
+        rts: null                  // true/false = force RTS right after open, null = leave alone
     },
     status: {
         format: 'grbl',            // 'grbl' -> <Idle|MPos:..|WPos:..|FS:..>   'json' -> {"t":"status",...}
@@ -41,16 +48,10 @@ const DEFAULTS = {
     // Grbl 1.1 only: rewrite "G21G91X+10F2000" into "$J=G21G91X+10F2000" so a pendant jog does not
     // leave CNCjs/Grbl stuck in relative mode (and so jogs go through Grbl's jog queue)
     jog: { translate: true },
+    // pendant console lines ("; ...") are kept here for the widget instead of being sent to Grbl
+    log: { max: 500 },
     verbose: false
 };
-
-
-
-
-
-
-
-
 
 // ---------------------------------------------------------------- config
 const program = new Command();
@@ -111,13 +112,15 @@ if (cli.verbose) cfg.verbose = true;
 if (!cfg.cncjs.port) { console.error('Missing CNC controller port (cncjs.port / --port)'); process.exit(1); }
 if (!cfg.device.path) { console.error('Missing pendant port (device.path / --pendant-port). Try --list'); process.exit(1); }
 
+
+
 // ---------------------------------------------------------------- state
 const store = { controller: { state: {}, settings: {} }, sender: { status: {} } };
 
 const health = {
     startedAt: Date.now(),
     pendant: { path: cfg.device.path, connected: false, lastRx: null, lastTx: null, rxLines: 0, txLines: 0,
-        reconnects: 0, errors: 0, lastError: null },
+        reconnects: 0, errors: 0, lastError: null, logLines: 0, garbageLines: 0 },
     cncjs: { socketConnected: false, portOpen: false, port: cfg.cncjs.port, controllerType: cfg.cncjs.controllerType,
         lastError: null },
     lastCommand: null
@@ -148,6 +151,7 @@ socket.on('serialport:close', () => { health.cncjs.portOpen = false; });
     });
     socket.on(type + ':settings', (settings) => { store.controller.settings = settings || {}; });
 });
+
 socket.on('sender:status', (data) => { store.sender.status = data || {}; });
 
 const cncReady = () => health.cncjs.socketConnected && health.cncjs.portOpen;
@@ -164,84 +168,57 @@ function sendCommand(name, ...args) {
 }
 
 // ---------------------------------------------------------------- pendant -> CNCjs
-// Realtime characters act immediately (even without a newline), like Grbl:
-//   !  feed hold    ~  cycle start    ^X (0x18)  soft reset    ?  status request
-// Everything else is collected into lines and sent as gcode.
-// Meta lines:  PING -> PONG,  STATUS? -> immediate status line.
+// Everything from the pendant is LINE based (newline terminated) and must be printable ASCII.
+// Lines that contain anything else are dropped (an ESP32 that is booting or running at the wrong
+// baud rate spews binary garbage, which must never reach the CNC).
+//   "!"  feed hold    "~"  cycle start    "^X" (0x18)  soft reset    "?"  status request
+//   each as a line of its own, e.g. "!\n". Reset is rate limited.
+//   ";..."  pendant console log entry (any text, ANSI colours stripped): kept in a ring buffer for the
+//           widget (GET /log), never sent to CNCjs; with -v it is printed as "pendant log: ..."
+//   lines dropped as non-text are reported with -v (escaped, at most one per second)
+//   PING -> PONG,  STATUS? -> immediate status line
+//   anything else -> gcode
+// After the pendant port opens, input is ignored for device.settleMs so the boot output of an
+// ESP32 that was reset by the open is discarded.
+const logBuf = [];
+let logSeq = 0;
+
+function addPendantLog(text) {
+    logBuf.push({ id: ++logSeq, t: Date.now(), text });
+    if (logBuf.length > cfg.log.max) logBuf.splice(0, logBuf.length - cfg.log.max);
+    health.pendant.logLines = logSeq;
+    log('pendant log:', text);
+}
+
+const PRINTABLE = /^[\x20-\x7e]+$/;
+const REALTIME = { '!': 'feedhold', '~': 'cyclestart', '\x18': 'reset' };
 let rxBuf = '';
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+let skipLine = false;
+let ignoreUntil = 0;
+let lastReset = 0;
 
 function onPendantData(buf) {
-    health.pendant.lastRx = Date.now();
+    const now = Date.now();
+    health.pendant.lastRx = now;
+    if (now < ignoreUntil) {
+        rxBuf = '';
+        skipLine = false;
+        return;
+    }
     const text = buf.toString('binary');
     for (let i = 0; i < text.length; i++) {
         const ch = text[i];
-        if (ch === '!') sendCommand('feedhold');
-        else if (ch === '~') sendCommand('cyclestart');
-        else if (ch === '\x18') sendCommand('reset');
-        else if (ch === '?') sendStatus(true);
-        else if (ch === '\n' || ch === '\r') {
+        if (ch === '\n' || ch === '\r') {
             const line = rxBuf.trim();
+            const drop = skipLine;
             rxBuf = '';
-            if (line) onPendantLine(line);
+            skipLine = false;
+            if (drop) health.pendant.garbageLines++;
+            else if (line) onPendantLine(line);
         } else if (rxBuf.length < 256) {
             rxBuf += ch;
+        } else {
+            skipLine = true; // overlong line: drop it up to the next newline
         }
     }
 }
@@ -254,52 +231,41 @@ function toJog(line) {
     return JOG_RE.test(compact) && /[XYZABC]/.test(compact) ? '$J=' + compact : line;
 }
 
+const ANSI = /\x1b\[[0-9;]*[A-Za-z]/g;
+let lastDropLog = 0;
 
+function dropLine(raw) {
+    health.pendant.garbageLines++;
+    const now = Date.now();
+    if (cfg.verbose && now - lastDropLog > 1000) {
+        lastDropLog = now;
+        console.log('pendant: dropped non-text line', JSON.stringify(raw.slice(0, 60)));
+    }
+}
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-function onPendantLine(line) {
+function onPendantLine(raw) {
     health.pendant.rxLines++;
+    if (raw === '?') return sendStatus(true);
+    if (REALTIME[raw]) {
+        if (raw === '\x18') {
+           const now = Date.now();
+            if (now - lastReset < 2000) return;
+            lastReset = now;
+        }
+        return sendCommand(REALTIME[raw]);
+    }
+    // decode as UTF-8, drop ANSI colour codes, tabs -> spaces
+    let line = Buffer.from(raw, 'binary').toString('utf8').replace(ANSI, '').replace(/\t/g, ' ').trim();
+    if (!line) return;
+    if (line[0] === ';') {
+        // console log entry from the pendant: any text is fine, it is never sent to the controller
+        addPendantLog(line.replace(/^;\s?/, '').replace(/[\x00-\x1f\x7f]/g, ''));
+        return;
+    }
+    if (!PRINTABLE.test(line)) {
+        dropLine(raw);
+        return;
+    }
     const upper = line.toUpperCase();
     if (upper === 'PING') return sendToPendant('PONG');
     if (upper === 'STATUS?') return sendStatus(true);
@@ -389,19 +355,18 @@ function scheduleReconnect() {
 
 function openPendant() {
     const port = new SerialPort({
-            path: cfg.device.path,
-            baudRate: Number(cfg.device.baudRate),
-            autoOpen: false,
-            dataBits: 8,
-            stopBits: 1,
-            parity: 'none',
-            rtscts: false,
-            xon: false,
-            xoff: false,
-            xany: false,
-            hupcl: !!cfg.device.hupcl
-        });
-
+        path: cfg.device.path,
+        baudRate: Number(cfg.device.baudRate),
+        autoOpen: false,
+        dataBits: 8,
+        stopBits: 1,
+        parity: 'none',
+        rtscts: false,
+        xon: false,
+        xoff: false,
+        xany: false,
+        hupcl: !!cfg.device.hupcl
+    });
     pendantPort = port;
     port.on('data', onPendantData);
     port.on('error', noteError);
@@ -417,9 +382,17 @@ function openPendant() {
             return;
         }
         rxBuf = '';
+        skipLine = false;
+        ignoreUntil = Date.now() + Number(cfg.device.settleMs || 0);
+        const lines = {};
+        if (cfg.device.dtr !== null && cfg.device.dtr !== undefined) lines.dtr = !!cfg.device.dtr;
+        if (cfg.device.rts !== null && cfg.device.rts !== undefined) lines.rts = !!cfg.device.rts;
+        if (Object.keys(lines).length) {
+            port.set(lines, (setErr) => { if (setErr) noteError(setErr); });
+        }
         health.pendant.connected = true;
         health.pendant.lastError = null;
-        console.log('Pendant connected on ' + cfg.device.path + ', baudrate: ' + cfg.device.baudRate);
+        console.log('Pendant connected on ' + cfg.device.path);
         sendStatus(true);
     });
 }
@@ -443,9 +416,16 @@ function healthReport() {
 let httpServer = null;
 if (cfg.http.enabled) {
     httpServer = http.createServer((req, res) => {
-        if (req.url === '/' || req.url === '/status') {
-            res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+        const url = new URL(req.url, 'http://localhost');
+        const headers = { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' };
+        if (url.pathname === '/' || url.pathname === '/status') {
+            res.writeHead(200, headers);
             res.end(JSON.stringify(healthReport()));
+        } else if (url.pathname === '/log') {
+            // GET /log?since=<id> -> entries with id > since (poll with the last id you saw)
+            const since = Number(url.searchParams.get('since')) || 0;
+            res.writeHead(200, headers);
+            res.end(JSON.stringify({ last: logSeq, entries: logBuf.filter((e) => e.id > since) }));
         } else {
             res.writeHead(404);
             res.end();

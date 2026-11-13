@@ -9,7 +9,11 @@
   "device": {
     "path": "/dev/pendant",
     "baudRate": 115200,
-    "reconnectMs": 3000
+    "reconnectMs": 3000,
+    "settleMs": 2000,
+    "hupcl": false,
+    "dtr": null,
+    "rts": null    
   },
   "status": {
     "format": "grbl",
