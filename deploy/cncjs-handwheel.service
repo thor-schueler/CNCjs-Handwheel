@@ -1,0 +1,20 @@
+[Unit]
+Description=CNCjs <-> ESP32 handwheel bridge
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=@USER@
+SupplementaryGroups=dialout
+WorkingDirectory=@PREFIX@
+ExecStart=@NODE@ @PREFIX@/bin/cncjs-handwheel --config @CONFIG@
+Restart=always
+RestartSec=3
+NoNewPrivileges=true
+ProtectSystem=full
+ProtectHome=read-only
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
