@@ -5,7 +5,14 @@
 //   pendant -> CNCjs : gcode lines (and a few realtime chars) read from the pendant's serial port
 //   CNCjs -> pendant : status lines (state, MPos, WPos, feed/spindle) written to the pendant
 //   Health/status of both links is exposed as JSON on http://127.0.0.1:8001/status (configurable).
-//   Pendant logs can be accessed on http://127.0.0.1:8001/logs (configurable)
+//   Pendant logs can be accessed on http://127.0.0.1:8001/log (configurable)
+
+// "install-service" / "uninstall-service": set up the systemd unit (and udev rule), then exit
+const subcommand = process.argv[2];
+if (subcommand === 'install-service' || subcommand === 'uninstall-service') {
+    require('../lib/service')(subcommand, process.argv.slice(3));
+    return;
+}
 
 const fs = require('fs');
 const os = require('os');
@@ -79,7 +86,21 @@ program
 program.parse(process.argv);
 const cli = program.opts();
 
+/**
+ * Tells whether a value is a plain object (not null, not an array).
+ *
+ * @param {*} v - value to test
+ * @returns {boolean}
+ */
 const isObj = (v) => v && typeof v === 'object' && !Array.isArray(v);
+/**
+ * Recursively merges `extra` into a copy of `base`. Plain objects are merged key by key,
+ * everything else (including arrays) is replaced. Neither argument is modified.
+ *
+ * @param {object} base - lower precedence values
+ * @param {object} [extra] - higher precedence values
+ * @returns {object} the merged copy
+ */
 const deepMerge = (base, extra) => {
     const out = Object.assign({}, base);
     Object.keys(extra || {}).forEach((k) => {
@@ -132,6 +153,12 @@ const health = {
     lastCommand: null
 };
 
+/**
+ * Logs to the console, but only when -v / verbose is on.
+ *
+ * @param {...*} args - what to print
+ * @returns {void}
+ */
 const log = (...args) => cfg.verbose && console.log(...args);
 let shuttingDown = false;
 
@@ -146,7 +173,7 @@ const socket = connectToCncjs(cncOpts, (err) => {
 
 socket.on('connect', () => { health.cncjs.socketConnected = true; });
 socket.on('disconnect', () => { health.cncjs.socketConnected = false; health.cncjs.portOpen = false; });
-socket.on('serialport:open', () => { health.cncjs.portOpen = true; health.cncjs.lastError = null; });
+socket.on('serialport:open', () => { health.cncjs.portOpen = true; health.cncjs.lastError = null; lastWco = null; });
 socket.on('serialport:close', () => { health.cncjs.portOpen = false; });
 
 ['Grbl', 'Smoothie', 'TinyG'].forEach((type) => {
@@ -164,8 +191,23 @@ socket.on('serialport:close', () => { health.cncjs.portOpen = false; });
 socket.on('sender:status', (data) => { store.sender.status = data || {}; });
 
 let lastWco = null; // Grbl 1.1 only reports MPos *or* WPos, plus WCO now and then: WPos = MPos - WCO
+/**
+ * Tells whether commands can currently reach the CNC controller
+ * (CNCjs socket connected and the CNC port open).
+ *
+ * @returns {boolean}
+ */
 const cncReady = () => health.cncjs.socketConnected && health.cncjs.portOpen;
 
+/**
+ * Sends a command to the CNC controller through CNCjs and answers the pendant with a status line.
+ * If CNCjs or the CNC port is not ready the command is dropped and the pendant gets
+ * `ERR:CNCJS_NOT_READY` plus a status line.
+ *
+ * @param {string} name - CNCjs command, e.g. 'gcode', 'feedhold', 'cyclestart', 'reset'
+ * @param {...*} args - command arguments, e.g. the gcode line
+ * @returns {boolean} true if the command was sent
+ */
 function sendCommand(name, ...args) {
     if (!cncReady()) {
         sendToPendant('ERR:CNCJS_NOT_READY');
@@ -183,6 +225,12 @@ function sendCommand(name, ...args) {
 // what CNCjs knew at that moment; a fresh report is requested so the real position follows within
 // a few tens of ms (forwarded by the :state handler).
 let lastPoll = 0;
+/**
+ * Answers a command from the pendant with a status line right away, and asks the controller for a
+ * fresh status report (at most every 50 ms) so the new position follows shortly after.
+ *
+ * @returns {void}
+ */
 function answerCommand() {
     sendStatus(true);
     const now = Date.now();
@@ -208,6 +256,12 @@ function answerCommand() {
 const logBuf = [];
 let logSeq = 0;
 
+/**
+ * Appends a pendant console line to the ring buffer served at GET /log (capped at log.max entries).
+ *
+ * @param {string} text - the log text, without the leading ';'
+ * @returns {void}
+ */
 function addPendantLog(text) {
     logBuf.push({ id: ++logSeq, t: Date.now(), text });
     if (logBuf.length > cfg.log.max) logBuf.splice(0, logBuf.length - cfg.log.max);
@@ -222,6 +276,13 @@ let skipLine = false;
 let ignoreUntil = 0;
 let lastReset = 0;
 
+/**
+ * Handler for raw bytes from the pendant's serial port. Splits the stream into lines, drops overlong
+ * lines, and ignores everything during the settle time after the port was opened.
+ *
+ * @param {Buffer} buf - chunk read from the serial port
+ * @returns {void}
+ */
 function onPendantData(buf) {
     const now = Date.now();
     health.pendant.lastRx = now;
@@ -251,6 +312,13 @@ function onPendantData(buf) {
 // Only modal words (G20/G21/G90/G91), axis words and a feed, no G0/G1/G2/G3 -> this is a jog.
 const JOG_RE = /^(?:G(?:20|21|90|91))+(?:[XYZABC][-+]?\d*\.?\d+|F\d*\.?\d+)+$/;
 
+/**
+ * Turns a pendant jog such as `G21G91X+10F2000` into a Grbl jog command (`$J=G21G91X+10F2000`).
+ * Lines that are not pure jogs (no axis word, or containing G0/G1/G2/G3 etc.) are returned unchanged.
+ *
+ * @param {string} line - gcode line from the pendant
+ * @returns {string} the jog command, or the original line
+ */
 function toJog(line) {
     const compact = line.replace(/\s+/g, '').toUpperCase();
     return JOG_RE.test(compact) && /[XYZABC]/.test(compact) ? '$J=' + compact : line;
@@ -259,6 +327,12 @@ function toJog(line) {
 const ANSI = /\x1b\[[0-9;]*[A-Za-z]/g;
 let lastDropLog = 0;
 
+/**
+ * Counts a rejected (non-text) pendant line and, with -v, reports it escaped (at most once a second).
+ *
+ * @param {string} raw - the rejected line as received (binary string)
+ * @returns {void}
+ */
 function dropLine(raw) {
     health.pendant.garbageLines++;
     const now = Date.now();
@@ -268,12 +342,19 @@ function dropLine(raw) {
     }
 }
 
+/**
+ * Handles one complete line from the pendant: realtime commands (! ~ ^X ?), console log entries
+ * (; ...), PING / STATUS?, and otherwise gcode (jogs are translated to $J= for Grbl).
+ *
+ * @param {string} raw - the line without the line terminator (binary string)
+ * @returns {void}
+ */
 function onPendantLine(raw) {
     health.pendant.rxLines++;
     if (raw === '?') return sendStatus(true);
     if (REALTIME[raw]) {
         if (raw === '\x18') {
-           const now = Date.now();
+            const now = Date.now();
             if (now - lastReset < 2000) return;
             lastReset = now;
         }
@@ -301,10 +382,37 @@ function onPendantLine(raw) {
 }
 
 // ---------------------------------------------------------------- CNCjs -> pendant
+/**
+ * Converts a value to a number, treating anything non-numeric as 0.
+ *
+ * @param {*} v
+ * @returns {number}
+ */
 const num = (v) => Number(v) || 0;
+/**
+ * Subtracts two {x, y, z} positions (a - b).
+ *
+ * @param {{x: (number|string), y: (number|string), z: (number|string)}} a
+ * @param {{x: (number|string), y: (number|string), z: (number|string)}} b
+ * @returns {{x: number, y: number, z: number}}
+ */
 const sub = (a, b) => ({ x: num(a.x) - num(b.x), y: num(a.y) - num(b.y), z: num(a.z) - num(b.z) });
+/**
+ * Adds two {x, y, z} positions (a + b).
+ *
+ * @param {{x: (number|string), y: (number|string), z: (number|string)}} a
+ * @param {{x: (number|string), y: (number|string), z: (number|string)}} b
+ * @returns {{x: number, y: number, z: number}}
+ */
 const add = (a, b) => ({ x: num(a.x) + num(b.x), y: num(a.y) + num(b.y), z: num(a.z) + num(b.z) });
 
+/**
+ * Returns machine and work position. Grbl 1.1 reports only one of them plus the work coordinate
+ * offset (WCO) now and then, so the missing one is derived: WPos = MPos - WCO.
+ *
+ * @param {object} st - the `status` object of the CNCjs controller state
+ * @returns {{mpos: ?object, wpos: ?object}} positions, null where they cannot be determined yet
+ */
 function positions(st) {
     const wco = st.wco || lastWco;
     let mpos = st.mpos || null;
@@ -314,6 +422,12 @@ function positions(st) {
     return { mpos, wpos };
 }
 
+/**
+ * Builds the current machine status from the latest CNCjs controller and sender state.
+ *
+ * @returns {{connected: boolean, state: string, mpos: ?object, wpos: ?object, feed: ?number,
+ *   spindle: ?number, sender: object}}
+ */
 function snapshot() {
     const connected = cncReady();
     const st = (store.controller.state && store.controller.state.status) || {};
@@ -331,6 +445,13 @@ function snapshot() {
     };
 }
 
+/**
+ * Formats a status snapshot as the line sent to the pendant, either Grbl style
+ * (`<Idle|MPos:x,y,z|WPos:x,y,z|FS:feed,spindle>`) or JSON, depending on status.format.
+ *
+ * @param {object} s - snapshot from snapshot()
+ * @returns {string} the status line without terminator
+ */
 function formatStatus(s) {
     if (cfg.status.format === 'json') {
         return JSON.stringify(Object.assign({ t: 'status' }, s));
@@ -348,8 +469,14 @@ function formatStatus(s) {
 
 let lastLine = '';
 let lastStatusAt = 0;
-let lastLogged = 0;
 
+/**
+ * Sends the current status to the pendant if one is due: forced, at least every status.intervalMs,
+ * or when the values changed and status.minGapMs has passed.
+ *
+ * @param {boolean} [force=false] - send regardless of timing
+ * @returns {void}
+ */
 function sendStatus(force) {
     const line = formatStatus(snapshot());
     const now = Date.now();
@@ -363,10 +490,17 @@ function sendStatus(force) {
     }
 }
 
-function sendToPendant(text, should_log=false) {
+/**
+ * Writes one line to the pendant's serial port.
+ *
+ * @param {string} text - the line, without terminator (a newline is added)
+ * @param {boolean} [shouldLog=true] - print the line when -v is on
+ * @returns {boolean} false if the pendant port is not open
+ */
+function sendToPendant(text, shouldLog=true) {
     const port = pendantPort;
     if (!port || !port.isOpen) return false;
-    if(should_log) log('cncjs -> ', 'pendant', text);
+    if(shouldLog) log('cncjs -> ', 'pendant', text);
     port.write(text + '\n', (err) => {
         if (err) noteError(err);
     });
@@ -375,18 +509,29 @@ function sendToPendant(text, should_log=false) {
     return true;
 }
 
-const statusTimer = setInterval(() => sendStatus(false), Math.max(20, Math.round(1000 / cfg.status.rateHz)));
+const statusTimer = setInterval(() => sendStatus(false), Math.max(10, Math.min(cfg.status.minGapMs, cfg.status.intervalMs)));
 
 // ---------------------------------------------------------------- pendant serial link
 let pendantPort = null;
 let reconnectTimer = null;
 
+/**
+ * Records a pendant serial error in the health data and prints it.
+ *
+ * @param {Error} err
+ * @returns {void}
+ */
 function noteError(err) {
     health.pendant.errors++;
     health.pendant.lastError = err.message;
     console.error('Pendant error:', err.message);
 }
 
+/**
+ * Schedules a reopen of the pendant serial port after device.reconnectMs (at most one pending).
+ *
+ * @returns {void}
+ */
 function scheduleReconnect() {
     if (shuttingDown || reconnectTimer) return;
     reconnectTimer = setTimeout(() => {
@@ -396,6 +541,12 @@ function scheduleReconnect() {
     }, cfg.device.reconnectMs);
 }
 
+/**
+ * Opens the pendant's serial port and wires up its events. Failures and closes schedule a reconnect.
+ * After a successful open, pendant input is ignored for device.settleMs and a status line is sent.
+ *
+ * @returns {void}
+ */
 function openPendant() {
     const port = new SerialPort({
         path: cfg.device.path,
@@ -441,6 +592,12 @@ function openPendant() {
 }
 
 // ---------------------------------------------------------------- health endpoint
+/**
+ * Builds the JSON served at GET /status: link health of the pendant and CNCjs, the last command
+ * sent, and the current machine status.
+ *
+ * @returns {object}
+ */
 function healthReport() {
     const now = Date.now();
     const age = (t) => (t ? now - t : null);
@@ -480,6 +637,12 @@ if (cfg.http.enabled) {
 }
 
 // ---------------------------------------------------------------- lifecycle
+/**
+ * Stops timers and closes the CNCjs socket, the pendant port and the HTTP server, then exits.
+ * Called on SIGINT / SIGTERM.
+ *
+ * @returns {void}
+ */
 function shutdown() {
     if (shuttingDown) return;
     shuttingDown = true;

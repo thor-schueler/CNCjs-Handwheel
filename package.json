@@ -2,10 +2,38 @@
   "name": "cncjs-handwheel",
   "version": "0.1.0",
   "description": "CNCjs pendant bridge for a serial (USB/Bluetooth) ESP32 CNC handwheel",
-  "main": "index.js",
-  "bin": { "cncjs-handwheel": "bin/cncjs-handwheel" },
-  "engines": { "node": ">=20" },
+  "keywords": [
+    "cncjs",
+    "pendant",
+    "handwheel",
+    "grbl",
+    "esp32",
+    "cnc"
+  ],
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/thor-schueler/CNCjs-Handwheel.git"
+  },
+  "author": "theRealThor",
+  "main": "index.js",
+  "bin": {
+    "cncjs-handwheel": "bin/cncjs-handwheel"
+  },
+  "files": [
+    "bin",
+    "lib",
+    "index.js",
+    "cncjs-pendant.config.example.json"
+  ],
+  "scripts": {
+    "start": "node bin/cncjs-handwheel",
+    "check": "node --check index.js && node --check bin/cncjs-handwheel && node --check lib/service.js",
+    "prepublishOnly": "npm run check"
+  },
+  "engines": {
+    "node": ">=20"
+  },
   "dependencies": {
     "commander": "^9.5.0",
     "jsonwebtoken": "^9.0.0",
