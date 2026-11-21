@@ -165,7 +165,7 @@ const health = {
         reconnects: 0, errors: 0, lastError: null, logLines: 0, garbageLines: 0 },
     cncjs: { socketConnected: false, portOpen: false, port: cfg.cncjs.port, controllerType: cfg.cncjs.controllerType,
         lastError: null, droppedCommands: 0 },
-    jog: { sent: 0, merged: 0, discarded: 0, stalls: 0, inFlight: 0, held: false },
+    jog: { sent: 0, merged: 0, discarded: 0, stalls: 0, cancels: 0, inFlight: 0, held: false },
     lastCommand: null
 };
 
@@ -397,6 +397,8 @@ function dropLine(raw) {
 function onPendantLine(raw) {
     health.pendant.rxLines++;
     if (raw === '?') return sendStatus(true);
+    // Grbl jog cancel: the raw byte 0x85 (also accepted as UTF-8, C2 85), or the text alias JOGCANCEL
+    if (raw === '\x85' || raw === '\xc2\x85' || raw.toUpperCase() === 'JOGCANCEL') return cancelJog();
     if (REALTIME[raw]) {
         if (raw === '\x18') {
             const now = Date.now();
@@ -530,10 +532,45 @@ function queueJog(j) {
 function flushJog(force) {
     const p = jog.pending;
     if (!p) return;
-    if (!force && jog.inFlight >= cfg.jog.maxInFlight) return;
+    if (!force && (cancelTimer || jog.inFlight >= cfg.jog.maxInFlight)) return;
     jog.pending = null;
     health.jog.held = false;
     writeGcode(p.raw || '$J=' + p.prefix + p.axis + fmtDist(p.dist) + 'F' + p.feed);
+}
+
+const CANCEL_SETTLE_DEFAULT_MS = 40;
+let cancelTimer = null;
+
+/**
+ * Cancels the jog in progress (pendant line 0x85 or JOGCANCEL). Three steps, in this order:
+ * 1. the jog held back by the governor is discarded;
+ * 2. `feeder:stop` empties the CNCjs feeder queue right away, so no further jog line leaves for Grbl
+ *    (a Grbl jog cancel only flushes Grbl's planner, jogs still queued in CNCjs would continue);
+ * 3. after jog.cancelSettleMs the `jogCancel` command (0x85) is sent. Grbl handles 0x85 the moment it
+ *    arrives, ahead of lines still unparsed in its serial buffer, so the short wait lets those lines
+ *    be parsed first; otherwise a long jog sent just before the cancel could start after it.
+ * Jogs from the pendant that arrive during the wait are held and released after the cancel.
+ * Lines CNCjs had already written to Grbl may still run (at most jog.maxInFlight short jogs).
+ *
+ * @returns {boolean} true if the cancel was started
+ */
+function cancelJog() {
+    health.jog.cancels++;
+    if (cfg.cncjs.controllerType !== 'Grbl') {
+        log('pendant -> jog cancel ignored: only supported for Grbl');
+        return false;
+    }
+    discardHeldJog();
+    if (!sendCommand('feeder:stop')) return false;
+    jog.inFlight = 0; // lines removed from the feeder will never be answered
+    health.jog.inFlight = 0;
+    clearTimeout(cancelTimer);
+    cancelTimer = setTimeout(() => {
+        cancelTimer = null;
+        sendCommand('jogCancel');
+        flushJog(false);
+    }, Number(cfg.jog.cancelSettleMs !== undefined ? cfg.jog.cancelSettleMs : CANCEL_SETTLE_DEFAULT_MS));
+    return true;
 }
 
 /**
@@ -872,6 +909,7 @@ function shutdown() {
     shuttingDown = true;
     clearInterval(statusTimer);
     clearInterval(jogTimer);
+    clearTimeout(cancelTimer);
     clearTimeout(reconnectTimer);
     socket.close();
     if (httpServer) httpServer.close();

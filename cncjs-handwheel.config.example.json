@@ -32,6 +32,7 @@
     "translate": true,
     "maxInFlight": 4,
     "stallMs": 2000,
+    "cancelSettleMs": 40,
     "echo": false
   },
   "http": { "enabled": true, "host": "127.0.0.1", "port": 8001 },

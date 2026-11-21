@@ -133,6 +133,7 @@ Start from `cncjs-pendant.config.example.json`.
 | `status.format` | `grbl` or `json` |
 | `jog.translate` | rewrite jogs like `G21G91X10F500` to `$J=...` so they do not leave Grbl in relative mode (default `true`; `false` or `--no-jog-translate` sends the pendant's lines as plain gcode, for comparing behavior) |
 | `jog.maxInFlight` | jog governor (default `4`, `0` = off): at most this many gcode lines are handed to CNCjs without an `ok`/`error` reply from Grbl. While the limit is reached, further jogs on the same axis and feed are merged into one longer jog (`Y-0.1` three times becomes `Y-0.3`), opposite jogs cancel out, and the result is sent as soon as a reply frees a slot. The position stays exact; nothing is queued without limit. A different axis or feed replaces the held jog, and a feed hold or reset discards it. This protects Grbl's small serial buffer, which loses characters when a fast wheel outruns it |
+| `jog.cancelSettleMs` | wait between emptying the CNCjs feeder queue and sending the Grbl jog cancel (default 40 ms, see "Jog cancel") |
 | `jog.stallMs` | if the controller acknowledges nothing for this long (default 2000), the unanswered lines are assumed lost: the bridge prints a warning, counts a stall and starts counting afresh |
 | `jog.echo` | tag jog lines with `{echo: false}` as context (default `false`; other gcode is not tagged). CNCjs passes it on in its `serialport:write` event, so a console widget can hide the `feeder> $J=...` echo. Stock CNCjs ignores it (see "Quieting the CNCjs console") |
 | `http` | health endpoint (`enabled`, `host`, `port`) |
@@ -148,6 +149,7 @@ Pendant to bridge:
 |---|---|
 | `G21G91X+10F2000` | jog (sent as `$J=...`); any other line is sent to the controller as gcode |
 | `!` / `~` / `^X` (0x18) | feed hold / cycle start / reset, each as a line of its own (reset at most once per 2 s) |
+| `0x85` (the single byte, as a line of its own) or `JOGCANCEL` | cancel the jog in progress (Grbl only), see "Jog cancel" below |
 | `?` or `STATUS?` | immediate status line |
 | `PING` | answered with `PONG` |
 | `; text` | console log entry for the widget; never sent to the controller |
@@ -226,7 +228,7 @@ Every line the bridge sends goes through the CNCjs *feeder*, and CNCjs echoes fe
 'serialport:write': (data, context) => {
     const { source, __sender__ } = { ...context };
     if (__sender__ === this.senderId) { return; }
-    if (context && context.echo && context.echo === false) { return; }   // <- jogs from the handwheel bridge
+    if (context && context.echo === false) { return; }   // <- jogs from the handwheel bridge
     ...
 ```
 
@@ -234,3 +236,19 @@ Two other sources of console noise can be reduced from the bridge's side:
 - `client> ?` and the `<Jog|MPos...>` reply come from the status request the bridge sends after pendant commands.
   Set `status.pollAfterCommand` to `false`; CNCjs polls the controller by itself and the pendant still gets status lines.
 - The `ok` for every jog is echoed by CNCjs (`serialport:read`); only a console filter can hide those.
+
+## Jog cancel
+
+For real jogging the pendant sends one long jog when the wheel or button starts (`$J=G21G91X1000F2000`) and a jog cancel when
+it stops. Send the single byte `0x85` followed by a newline (or the text line `JOGCANCEL`). The bridge then
+
+1. discards a jog the governor is holding back,
+2. sends CNCjs `feeder:stop`, which empties CNCjs's own queue so no further jog line leaves for Grbl (Grbl's cancel flushes
+   only Grbl's planner; jogs still waiting in CNCjs would start again afterwards),
+3. after `jog.cancelSettleMs` sends CNCjs `jogCancel`, which writes the realtime byte `0x85` to Grbl. Grbl acts on `0x85` the
+   moment it arrives, ahead of lines still unparsed in its serial buffer, so the short wait lets those be parsed first;
+   without it a long jog sent just before the cancel could start after it.
+
+Jogs that arrive during that wait are held and released after the cancel. Lines CNCjs had already written to Grbl may still
+run: with the governor that is at most `jog.maxInFlight` short jogs. Jog cancel is Grbl only and needs a CNCjs that knows the
+`jogCancel` command (1.11 or a fork based on it). `/status` counts cancels under `jog.cancels`.

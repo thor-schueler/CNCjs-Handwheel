@@ -125,7 +125,8 @@ function render() {
  */
 function sendLine(text) {
     if (!port.isOpen) return;
-    port.write(text + '\n');
+    // single control bytes such as 0x85 (jog cancel) go out as that raw byte, not as UTF-8
+    port.write(Buffer.from(text + '\n', /^[\x80-\xff]+$/.test(text) ? 'latin1' : 'utf8'));
     sim.tx++;
 }
 
