@@ -44,7 +44,7 @@ const STEPS = { 1: '1', 2: '0.1', 3: '0.01', 4: '0.001' };
  *   burstHz: number, help: boolean}}
  */
 function parseArgs(argv) {
-    const o = { port: null, baud: 115200, step: '0.1', feed: 2000, script: null, burstCount: 500, burstHz: 500, help: false };
+    const o = { port: null, baud: 115200, step: '0.1', feed: 2000, script: null, burstCount: 500, burstHz: 100, help: false };
     for (let i = 0; i < argv.length; i++) {
         const a = argv[i];
         if (a === '--port' || a === '-p') o.port = argv[++i];

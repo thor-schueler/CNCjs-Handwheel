@@ -128,10 +128,13 @@ Start from `cncjs-pendant.config.example.json`.
 | `device.baudRate`, `device.settleMs` | pendant baud rate; pendant input is ignored this long after opening |
 | `device.send` | `false` (or `--no-pendant-send`): never write anything to the pendant, no status, `PONG` or `ERR`. Pendant to CNCjs keeps working. Useful when the firmware does not read from the serial port yet, or to rule the status stream out when debugging |
 | `device.hupcl`, `dtr`, `rts` | modem control line handling (the defaults are fine with the udev rule) |
-| `status.intervalMs`, `status.minGapMs` | status line at least every 100 ms, and at most every 25 ms when values change |
-| `status.pollAfterCommand` | ask Grbl for a fresh report after each pendant command |
+| `status.intervalMs`, `status.minGapMs` | status line at least every 400 ms (the heartbeat), and never more often than every 350 ms (about 3 per second); a burst of commands or position changes costs one line per gap, always carrying the latest values. Explicit `?` / `STATUS?` requests are answered at once |
+| `status.pollAfterCommand` | ask Grbl for a fresh report after pendant commands (at most one per `status.minGapMs`) |
 | `status.format` | `grbl` or `json` |
 | `jog.translate` | rewrite jogs like `G21G91X10F500` to `$J=...` so they do not leave Grbl in relative mode (default `true`; `false` or `--no-jog-translate` sends the pendant's lines as plain gcode, for comparing behavior) |
+| `jog.maxInFlight` | jog governor (default `4`, `0` = off): at most this many gcode lines are handed to CNCjs without an `ok`/`error` reply from Grbl. While the limit is reached, further jogs on the same axis and feed are merged into one longer jog (`Y-0.1` three times becomes `Y-0.3`), opposite jogs cancel out, and the result is sent as soon as a reply frees a slot. The position stays exact; nothing is queued without limit. A different axis or feed replaces the held jog, and a feed hold or reset discards it. This protects Grbl's small serial buffer, which loses characters when a fast wheel outruns it |
+| `jog.stallMs` | if the controller acknowledges nothing for this long (default 2000), the unanswered lines are assumed lost: the bridge prints a warning, counts a stall and starts counting afresh |
+| `jog.echo` | tag jog lines with `{echo: false}` as context (default `false`; other gcode is not tagged). CNCjs passes it on in its `serialport:write` event, so a console widget can hide the `feeder> $J=...` echo. Stock CNCjs ignores it (see "Quieting the CNCjs console") |
 | `http` | health endpoint (`enabled`, `host`, `port`) |
 | `log.max` | pendant log lines kept for the widget |
 
@@ -153,14 +156,14 @@ Bridge to pendant:
 
 | Line | Meaning |
 |---|---|
-| `<Idle\|MPos:x,y,z\|WPos:x,y,z\|FS:feed,spindle>` | status, after every command and at least every 100 ms |
+| `<Idle\|MPos:x,y,z\|WPos:x,y,z\|FS:feed,spindle>` | status: at most about 3 per second, at least every 400 ms, and shortly after every command |
 | `<Disconnected>` | the bridge is up, but CNCjs or the CNC port is not |
 | `ERR:CNCJS_NOT_READY` | a command was dropped because the CNC port is not open |
 | `PONG` | answer to `PING` |
 
 The status right after a command shows where the machine was at that moment; Grbl's `ok` only means the move was
-queued. A fresh report follows within a few tens of milliseconds, and the 100 ms stream tracks the move.
-If no line arrives for about 500 ms, treat the bridge as gone.
+queued. A fresh report follows within a few hundred milliseconds, and the status stream (about 3 lines per second while
+the machine moves) tracks the move. If no line arrives for about 1 second, treat the bridge as gone.
 
 ## Troubleshooting
 
@@ -168,6 +171,10 @@ If no line arrives for about 500 ms, treat the bridge as gone.
   token, backoff of 1 to 10 s) and reattaches to the CNC port; the console shows `Disconnected`, `Reconnecting in ...`,
   `Connected to ws://...` and `Connected to port ...`. No restart of the bridge is needed. Nothing is queued while the
   connection is down, so a stale jog is never replayed afterwards.
+- **`Controller did not acknowledge N gcode line(s)`.** Grbl never answered lines CNCjs was given, so they were most
+  likely lost on the way (serial buffer overflow, cable or adapter trouble). Jogs are merged and limited by
+  `jog.maxInFlight` to avoid this; if it still happens, lower it (try `2`). `/status` shows the counters under `jog`
+  (`sent`, `merged`, `discarded`, `stalls`, `inFlight`, `held`).
 - **Commands from the pendant have no effect.** Look for `Dropped pendant command (...)` in the console. It says whether
   the bridge is not connected to CNCjs or the CNC port is not open, and `/status` counts them in
   `cncjs.droppedCommands`. The pendant also receives `ERR:CNCJS_NOT_READY`. If the bridge claims everything is fine but
@@ -207,3 +214,23 @@ node tools/pendant-sim.js --port /tmp/pendant-sim --script "step:0.1, x+*500@500
 ```
 
 Tokens: `x+ x- y+ y- z+ z-`, `x+*200@100` (200 jogs at 100/s), `step:N`, `feed:N`, `home hold resume reset status ping cancel`, `log:text`, `raw:LINE`, `wait:MS`.
+
+## Quieting the CNCjs console
+
+Every line the bridge sends goes through the CNCjs *feeder*, and CNCjs echoes feeder lines in its Console widget as `feeder> ...`
+(lines of a G-code file are not echoed, because the sender never emits `serialport:write`). The bridge tags jogs with
+`{echo: false}` in the command context; CNCjs passes the context along, so the Console widget can skip them with one check in
+`src/app/widgets/Console/index.jsx`:
+
+```js
+'serialport:write': (data, context) => {
+    const { source, __sender__ } = { ...context };
+    if (__sender__ === this.senderId) { return; }
+    if (context && context.echo && context.echo === false) { return; }   // <- jogs from the handwheel bridge
+    ...
+```
+
+Two other sources of console noise can be reduced from the bridge's side:
+- `client> ?` and the `<Jog|MPos...>` reply come from the status request the bridge sends after pendant commands.
+  Set `status.pollAfterCommand` to `false`; CNCjs polls the controller by itself and the pendant still gets status lines.
+- The `ok` for every jog is echoed by CNCjs (`serialport:read`); only a console filter can hide those.

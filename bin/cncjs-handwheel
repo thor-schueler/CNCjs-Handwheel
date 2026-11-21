@@ -54,16 +54,21 @@ const DEFAULTS = {
     },
     status: {
         format: 'grbl',            // 'grbl' -> <Idle|MPos:..|WPos:..|FS:..>   'json' -> {"t":"status",...}
-        intervalMs: 100,           // unsolicited status line at least this often (also the pendant's "host alive" signal)
-        minGapMs: 25,              // minimum gap between two status lines when the values change
+        intervalMs: 400,           // unsolicited status line at least this often (also the pendant's "host alive" signal)
+        minGapMs: 350,             // minimum gap between two status lines (about 3 per second at most)
         pollAfterCommand: true,    // ask CNCjs/Grbl for a fresh status report after every pendant command
         decimals: 3
     },
     http: { enabled: true, host: '127.0.0.1', port: 8001 },
     
-    // Grbl 1.1 only: rewrite "G21G91X+10F2000" into "$J=G21G91X+10F2000" so a pendant jog does not
+    // translate (Grbl 1.1 only): rewrite "G21G91X+10F2000" into "$J=G21G91X+10F2000" so a pendant jog does not
     // leave CNCjs/Grbl stuck in relative mode (and so jogs go through Grbl's jog queue)
-    jog: { translate: true },
+    // maxInFlight: at most this many gcode lines handed to CNCjs and not yet answered with ok/error. While the
+    //   limit is reached, jogs on the same axis and feed are merged into one longer jog (0 = no limit, no merging)
+    // stallMs: if nothing is acknowledged for this long, assume lines were lost and start counting afresh
+    // echo: tag jog lines sent to CNCjs with {echo: false} in their context. CNCjs passes the context on in its
+    //   'serialport:write' event, so a console widget can skip them (see README); it changes nothing else
+    jog: { translate: true, maxInFlight: 4, stallMs: 2000, echo: false },
     
     // pendant console lines ("; ...") are kept here for the widget instead of being sent to Grbl
     log: { max: 500 },
@@ -160,6 +165,7 @@ const health = {
         reconnects: 0, errors: 0, lastError: null, logLines: 0, garbageLines: 0 },
     cncjs: { socketConnected: false, portOpen: false, port: cfg.cncjs.port, controllerType: cfg.cncjs.controllerType,
         lastError: null, droppedCommands: 0 },
+    jog: { sent: 0, merged: 0, discarded: 0, stalls: 0, inFlight: 0, held: false },
     lastCommand: null
 };
 
@@ -182,13 +188,14 @@ const socket = connectToCncjs(cncOpts, (err) => {
 });
 
 socket.on('connect', () => { health.cncjs.socketConnected = true; });
-socket.on('disconnect', () => { health.cncjs.socketConnected = false; health.cncjs.portOpen = false; });
+socket.on('disconnect', () => { health.cncjs.socketConnected = false; health.cncjs.portOpen = false; resetJogs(); });
+socket.on('serialport:read', onControllerLine);
 socket.on('serialport:open', () => {
-    if (!health.cncjs.portOpen) lastWco = null; // a keepalive confirmation must not discard the work offset
+    if (!health.cncjs.portOpen) { lastWco = null; resetJogs(); } // a keepalive confirmation must not discard the work offset
     health.cncjs.portOpen = true;
     health.cncjs.lastError = null;
 });
-socket.on('serialport:close', () => { health.cncjs.portOpen = false; });
+socket.on('serialport:close', () => { health.cncjs.portOpen = false; resetJogs(); });
 
 ['Grbl', 'Smoothie', 'TinyG'].forEach((type) => {
     let dumped = false;
@@ -221,12 +228,13 @@ const cncReady = () => socket.connected && health.cncjs.portOpen;
  * @returns {void}
  */
 let lastDropWarn = 0;
+const fmtArgs = (args) => args.map((a) => (a !== null && typeof a === 'object' ? JSON.stringify(a) : a));
 function noteDropped(name, args) {
     health.cncjs.droppedCommands++;
     const now = Date.now();
     if (now - lastDropWarn < 1000) return;
     lastDropWarn = now;
-    console.warn('Dropped pendant command (' + [name].concat(args).join(' ') + '): ' +
+    console.warn('Dropped pendant command (' + [name].concat(fmtArgs(args)).join(' ') + '): ' +
         (socket.connected ? 'the CNC port is not open' : 'not connected to CNCjs') +
         ' [' + health.cncjs.droppedCommands + ' dropped so far]');
 }
@@ -244,11 +252,11 @@ function sendCommand(name, ...args) {
     if (!cncReady()) {
         noteDropped(name, args);
         sendToPendant('ERR:CNCJS_NOT_READY');
-        sendStatus(true);
+        queueStatus();
         return false;
     }
     health.lastCommand = { at: Date.now(), name, args };
-    log('pendant ->', name, ...args);
+    log('pendant ->', name, ...fmtArgs(args));
     if (!socket.emit('command', cfg.cncjs.port, name, ...args)) {
         noteDropped(name, args);
         return false;
@@ -262,15 +270,16 @@ function sendCommand(name, ...args) {
 // a few tens of ms (forwarded by the :state handler).
 let lastPoll = 0;
 /**
- * Answers a command from the pendant with a status line right away, and asks the controller for a
- * fresh status report (at most every 50 ms) so the new position follows shortly after.
+ * Answers a command from the pendant with a status line (within status.minGapMs, so a burst of
+ * commands does not flood the pendant), and asks the controller for a fresh status report (at most
+ * once per status.minGapMs) so the new position follows shortly after.
  *
  * @returns {void}
  */
 function answerCommand() {
-    sendStatus(true);
+    queueStatus();
     const now = Date.now();
-    if (cfg.status.pollAfterCommand && now - lastPoll >= 50) {
+    if (cfg.status.pollAfterCommand && now - lastPoll >= Math.max(50, cfg.status.minGapMs)) {
         lastPoll = now;
         socket.emit('command', cfg.cncjs.port, 'statusreport');
     }
@@ -394,6 +403,9 @@ function onPendantLine(raw) {
             if (now - lastReset < 2000) return;
             lastReset = now;
         }
+        // stop means stop: jogs still held back must not fire after a feed hold or a reset
+        if (raw === '!' || raw === '\x18') discardHeldJog();
+        if (raw === '\x18') jog.inFlight = 0; // a soft reset flushes everything Grbl had not answered yet
         return sendCommand(REALTIME[raw]);
     }
     // decode as UTF-8, drop ANSI colour codes, tabs -> spaces
@@ -414,8 +426,167 @@ function onPendantLine(raw) {
     if (cfg.jog.translate && cfg.cncjs.controllerType === 'Grbl') {
         line = toJog(line);
     }
-    sendCommand('gcode', line);
+    sendGcodeLine(line);
 }
+
+// ---------------------------------------------------------------- jog governor
+// CNCjs hands every gcode line it is given to Grbl without waiting for the previous one to be
+// answered. Grbl only has a 128 byte serial buffer (about 6 jog lines), and stops reading it while its
+// planner is full, so a fast wheel makes it lose characters: jogs vanish or turn into garbage.
+// The bridge therefore counts the lines it has handed to CNCjs minus the ok / error replies it sees,
+// and while jog.maxInFlight is reached it merges further jogs (same axis, feed and relative mode;
+// opposite directions cancel out) into one pending jog that is sent as soon as a reply frees a slot.
+const jog = { inFlight: 0, lastAck: 0, pending: null };
+const JOG_PARTS = /^\$J=((?:G(?:20|21|90|91))+)([XYZABC])([-+]?\d*\.?\d+)F(\d*\.?\d+)$/;
+
+/**
+ * Splits a single-axis relative Grbl jog (`$J=G21G91Y-0.1F2000`) into its parts.
+ *
+ * @param {string} line - gcode line, already translated by toJog()
+ * @returns {?{raw: string, prefix: string, axis: string, dist: number, feed: string}} null if the line
+ *   is not a jog that can be merged with others
+ */
+function parseJog(line) {
+    const m = JOG_PARTS.exec(line);
+    if (!m) return null;
+    const words = m[1].match(/G\d+/g);
+    if (!words.includes('G91') || words.includes('G90')) return null;
+    return { raw: line, prefix: m[1], axis: m[2], dist: Number(m[3]), feed: m[4] };
+}
+
+/**
+ * Formats a signed jog distance without floating point noise, e.g. -0.1, +0.3, +10.
+ *
+ * @param {number} d - distance
+ * @returns {string}
+ */
+function fmtDist(d) {
+    const s = Math.abs(d).toFixed(4).replace(/\.?0+$/, '');
+    return (d < 0 ? '-' : '+') + (s || '0');
+}
+
+/**
+ * Sends a gcode line to CNCjs and counts it as unanswered (when the jog governor is on). Jogs ($J=)
+ * carry `{echo: false}` as context when jog.echo is off.
+ *
+ * @param {string} line - the gcode line
+ * @returns {boolean} true if the line was sent
+ */
+function writeGcode(line) {
+    const quiet = !cfg.jog.echo && /^\$J=/.test(line);
+    if (!(quiet ? sendCommand('gcode', line, { echo: false }) : sendCommand('gcode', line))) return false;
+    if (cfg.jog.maxInFlight > 0) {
+        if (jog.inFlight === 0) jog.lastAck = Date.now();
+        jog.inFlight++;
+        health.jog.inFlight = jog.inFlight;
+    }
+    health.jog.sent++;
+    return true;
+}
+
+/**
+ * Sends a gcode line from the pendant: jogs go through the governor, everything else goes straight
+ * out (after any held back jog, to keep the order).
+ *
+ * @param {string} line - the gcode line
+ * @returns {boolean} true if the line was sent or held back
+ */
+function sendGcodeLine(line) {
+    const j = cfg.jog.maxInFlight > 0 ? parseJog(line) : null;
+    if (j) return queueJog(j);
+    flushJog(true);
+    return writeGcode(line);
+}
+
+/**
+ * Adds a jog to the pending one (same axis, feed and mode: distances add up, opposite jogs cancel;
+ * anything else replaces it) and sends it if there is room.
+ *
+ * @param {object} j - jog from parseJog()
+ * @returns {boolean} true
+ */
+function queueJog(j) {
+    const p = jog.pending;
+    if (p && p.prefix === j.prefix && p.axis === j.axis && p.feed === j.feed) {
+        p.dist += j.dist;
+        p.raw = null;
+        health.jog.merged++;
+        if (Math.abs(p.dist) < 1e-9) jog.pending = null;
+    } else {
+        if (p) health.jog.discarded++;
+        jog.pending = j;
+    }
+    flushJog(false);
+    health.jog.held = !!jog.pending;
+    return true;
+}
+
+/**
+ * Sends the pending jog if the limit allows (or when forced).
+ *
+ * @param {boolean} force - send even if jog.maxInFlight is reached
+ * @returns {void}
+ */
+function flushJog(force) {
+    const p = jog.pending;
+    if (!p) return;
+    if (!force && jog.inFlight >= cfg.jog.maxInFlight) return;
+    jog.pending = null;
+    health.jog.held = false;
+    writeGcode(p.raw || '$J=' + p.prefix + p.axis + fmtDist(p.dist) + 'F' + p.feed);
+}
+
+/**
+ * Throws away a jog that is being held back (after a feed hold or reset).
+ *
+ * @returns {void}
+ */
+function discardHeldJog() {
+    if (jog.pending) health.jog.discarded++;
+    jog.pending = null;
+    health.jog.held = false;
+}
+
+/**
+ * Forgets all jog accounting (CNCjs connection or CNC port changed): nothing stale is replayed.
+ *
+ * @returns {void}
+ */
+function resetJogs() {
+    jog.inFlight = 0;
+    jog.pending = null;
+    health.jog.inFlight = 0;
+    health.jog.held = false;
+}
+
+/**
+ * Handles a line CNCjs read from the controller: every ok / error reply frees a slot and may release
+ * the held jog.
+ *
+ * @param {*} data - the line (string) as emitted by CNCjs
+ * @returns {void}
+ */
+function onControllerLine(data) {
+    const line = String(data === null || data === undefined ? '' : data).trim();
+    if (line !== 'ok' && line.slice(0, 6).toLowerCase() !== 'error:') return;
+    if (jog.inFlight > 0) jog.inFlight--;
+    health.jog.inFlight = jog.inFlight;
+    jog.lastAck = Date.now();
+    flushJog(false);
+    health.jog.held = !!jog.pending;
+}
+
+// Lines the controller never answers (lost in transit) would keep the counter up for good.
+const jogTimer = setInterval(() => {
+    if (jog.inFlight > 0 && Date.now() - jog.lastAck > cfg.jog.stallMs) {
+        health.jog.stalls++;
+        console.warn('Controller did not acknowledge ' + jog.inFlight + ' gcode line(s) for ' + cfg.jog.stallMs +
+            ' ms: they may have been lost. [' + health.jog.stalls + ' stall(s) so far]');
+        jog.inFlight = 0;
+        health.jog.inFlight = 0;
+    }
+    flushJog(false);
+}, 250);
 
 // ---------------------------------------------------------------- CNCjs -> pendant
 /**
@@ -505,10 +676,11 @@ function formatStatus(s) {
 
 let lastLine = '';
 let lastStatusAt = 0;
+let statusQueued = false;
 
 /**
  * Sends the current status to the pendant if one is due: forced, at least every status.intervalMs,
- * or when the values changed and status.minGapMs has passed.
+ * when the values changed and status.minGapMs has passed, or when one was queued with queueStatus().
  *
  * @param {boolean} [force=false] - send regardless of timing
  * @returns {void}
@@ -517,14 +689,27 @@ function sendStatus(force) {
     if (!cfg.device.send) return;
     const line = formatStatus(snapshot());
     const now = Date.now();
+    const gapOk = now - lastStatusAt >= cfg.status.minGapMs;
     const due = now - lastStatusAt >= cfg.status.intervalMs;
-    const changed = line !== lastLine && now - lastStatusAt >= cfg.status.minGapMs;
-    if (force || due || changed) {
+    const changed = line !== lastLine && gapOk;
+    if (force || due || changed || (statusQueued && gapOk)) {
         if (sendToPendant(line, changed)) {
             lastLine = line;
             lastStatusAt = now;
+            statusQueued = false;
         }
     }
+}
+
+/**
+ * Asks for a status line to go to the pendant soon: now if status.minGapMs has passed since the last
+ * one, otherwise as soon as it has (the periodic timer sends it). Many requests in a row cost one line.
+ *
+ * @returns {void}
+ */
+function queueStatus() {
+    statusQueued = true;
+    sendStatus(false);
 }
 
 /**
@@ -547,7 +732,7 @@ function sendToPendant(text, should_log=false) {
     return true;
 }
 
-const statusTimer = setInterval(() => sendStatus(false), Math.max(10, Math.min(cfg.status.minGapMs, cfg.status.intervalMs)));
+const statusTimer = setInterval(() => sendStatus(false), Math.max(10, Math.min(100, cfg.status.minGapMs, cfg.status.intervalMs)));
 
 // ---------------------------------------------------------------- pendant serial link
 let pendantPort = null;
@@ -646,6 +831,7 @@ function healthReport() {
         pendant: Object.assign({}, health.pendant, { sendEnabled: !!cfg.device.send, lastRxAgeMs: age(health.pendant.lastRx),
             lastTxAgeMs: age(health.pendant.lastTx) }),
         cncjs: health.cncjs,
+        jog: health.jog,
         lastCommand: health.lastCommand,
         status: snapshot()
     };
@@ -685,6 +871,7 @@ function shutdown() {
     if (shuttingDown) return;
     shuttingDown = true;
     clearInterval(statusTimer);
+    clearInterval(jogTimer);
     clearTimeout(reconnectTimer);
     socket.close();
     if (httpServer) httpServer.close();

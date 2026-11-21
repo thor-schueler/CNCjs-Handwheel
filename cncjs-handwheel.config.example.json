@@ -4,24 +4,36 @@
     "baudrate": 115200,
     "controllerType": "Grbl",
     "socketAddress": "localhost",
-    "socketPort": 8000
+    "socketPort": 8000,
+    "retryInterval": 5000,
+    "openTimeout": 5000,
+    "maxOpenTries": 3,
+    "keepaliveMs": 30000,
+    "reopenOnClose": true
   },
   "device": {
-    "path": "/dev/ttyACM0",
+    "path": "/dev/pendant",
     "baudRate": 115200,
     "reconnectMs": 3000,
     "settleMs": 2000,
+    "send": true,
     "hupcl": false,
     "dtr": null,
     "rts": null
   },
   "status": {
     "format": "grbl",
-    "intervalMs": 100,
-    "minGapMs": 25,
-    "pollAfterCommand": true
+    "intervalMs": 400,
+    "minGapMs": 350,
+    "pollAfterCommand": false,
+    "decimals": 3
+  },
+  "jog": {
+    "translate": true,
+    "maxInFlight": 4,
+    "stallMs": 2000,
+    "echo": false
   },
   "http": { "enabled": true, "host": "127.0.0.1", "port": 8001 },
-  "jog": { "translate": true },
   "log": { "max": 500 }
 }
