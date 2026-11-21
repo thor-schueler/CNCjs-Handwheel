@@ -7,7 +7,7 @@
 //   Health/status of both links is exposed as JSON on http://127.0.0.1:8001/status (configurable).
 //   Pendant logs can be accessed on http://127.0.0.1:8001/log (configurable)
 
-// "install-service" / "uninstall-service": set up the systemd unit (and udev rule), then exit
+// "install-service" / "uninstall-service": set up the systemd unit (and udev rule or Bluetooth binding), then exit
 const subcommand = process.argv[2];
 if (subcommand === 'install-service' || subcommand === 'uninstall-service') {
     require('../lib/service')(subcommand, process.argv.slice(3));
@@ -32,13 +32,19 @@ const DEFAULTS = {
         controllerType: 'Grbl',    // Grbl | Smoothie (TinyG: state is not mapped yet)
         socketAddress: 'localhost',
         socketPort: 8000,
-        accessTokenLifetime: '30d'
+        accessTokenLifetime: '30d',
+        retryInterval: 5000,       // ms before a failed or lost port open is retried (0 = never)
+        openTimeout: 5000,         // ms to wait for CNCjs to answer an open request
+        maxOpenTries: 3,           // unanswered open requests before the connection to CNCjs is rebuilt
+        keepaliveMs: 30000,        // repeat the open request this often to verify the attachment (0 = off)
+        reopenOnClose: true        // reopen the CNC port when it gets closed (e.g. from the CNCjs UI)
     },
     device: {
         path: '/dev/pendant',      // the pendant's serial port (e.g. /dev/ttyACM0 or /dev/rfcomm0)
         baudRate: 115200,
         reconnectMs: 3000,
         settleMs: 2000,            // ignore pendant input this long after opening the port
+        send: true,                // false: never write anything to the pendant (status, PONG, ERR)
 
         // Modem-control lines. The CH340 + auto-reset transistors wire DTR/RTS to EN/IO0, so on Linux
         // the DTR/RTS toggling around open/close can reset the ESP32 or drop it into download mode.
@@ -82,7 +88,9 @@ program
     .option('--pendant-port <path>', 'serial port of the pendant')
     .option('--pendant-baudrate <baudrate>', 'baud rate of the pendant')
     .option('-v, --verbose', 'log pendant events and the commands sent to CNCjs')
-    .option('--trace', 'also log all controller traffic (very noisy)');
+    .option('--trace', 'also log all controller traffic (very noisy)')
+    .option('--no-pendant-send', 'do not write anything to the pendant (same as device.send: false)')
+    .option('--no-jog-translate', 'send pendant jogs as plain gcode instead of $J= (same as jog.translate: false)');
 program.parse(process.argv);
 const cli = program.opts();
 
@@ -137,6 +145,8 @@ if (cli.pendantPort) cfg.device.path = cli.pendantPort;
 if (cli.pendantBaudrate) cfg.device.baudRate = cli.pendantBaudrate;
 if (cli.verbose) cfg.verbose = true;
 if (cli.trace) cfg.trace = true;
+if (cli.pendantSend === false) cfg.device.send = false;
+if (cli.jogTranslate === false) cfg.jog.translate = false;
 
 if (!cfg.cncjs.port) { console.error('Missing CNC controller port (cncjs.port / --port)'); process.exit(1); }
 if (!cfg.device.path) { console.error('Missing pendant port (device.path / --pendant-port). Try --list'); process.exit(1); }
@@ -149,7 +159,7 @@ const health = {
     pendant: { path: cfg.device.path, connected: false, lastRx: null, lastTx: null, rxLines: 0, txLines: 0,
         reconnects: 0, errors: 0, lastError: null, logLines: 0, garbageLines: 0 },
     cncjs: { socketConnected: false, portOpen: false, port: cfg.cncjs.port, controllerType: cfg.cncjs.controllerType,
-        lastError: null },
+        lastError: null, droppedCommands: 0 },
     lastCommand: null
 };
 
@@ -173,7 +183,11 @@ const socket = connectToCncjs(cncOpts, (err) => {
 
 socket.on('connect', () => { health.cncjs.socketConnected = true; });
 socket.on('disconnect', () => { health.cncjs.socketConnected = false; health.cncjs.portOpen = false; });
-socket.on('serialport:open', () => { health.cncjs.portOpen = true; health.cncjs.lastError = null; lastWco = null; });
+socket.on('serialport:open', () => {
+    if (!health.cncjs.portOpen) lastWco = null; // a keepalive confirmation must not discard the work offset
+    health.cncjs.portOpen = true;
+    health.cncjs.lastError = null;
+});
 socket.on('serialport:close', () => { health.cncjs.portOpen = false; });
 
 ['Grbl', 'Smoothie', 'TinyG'].forEach((type) => {
@@ -197,7 +211,25 @@ let lastWco = null; // Grbl 1.1 only reports MPos *or* WPos, plus WCO now and th
  *
  * @returns {boolean}
  */
-const cncReady = () => health.cncjs.socketConnected && health.cncjs.portOpen;
+const cncReady = () => socket.connected && health.cncjs.portOpen;
+
+/**
+ * Records and reports a command that could not be sent (at most one console line per second).
+ *
+ * @param {string} name - the CNCjs command that was dropped
+ * @param {Array} args - its arguments
+ * @returns {void}
+ */
+let lastDropWarn = 0;
+function noteDropped(name, args) {
+    health.cncjs.droppedCommands++;
+    const now = Date.now();
+    if (now - lastDropWarn < 1000) return;
+    lastDropWarn = now;
+    console.warn('Dropped pendant command (' + [name].concat(args).join(' ') + '): ' +
+        (socket.connected ? 'the CNC port is not open' : 'not connected to CNCjs') +
+        ' [' + health.cncjs.droppedCommands + ' dropped so far]');
+}
 
 /**
  * Sends a command to the CNC controller through CNCjs and answers the pendant with a status line.
@@ -210,13 +242,17 @@ const cncReady = () => health.cncjs.socketConnected && health.cncjs.portOpen;
  */
 function sendCommand(name, ...args) {
     if (!cncReady()) {
+        noteDropped(name, args);
         sendToPendant('ERR:CNCJS_NOT_READY');
         sendStatus(true);
         return false;
     }
     health.lastCommand = { at: Date.now(), name, args };
     log('pendant ->', name, ...args);
-    socket.emit('command', cfg.cncjs.port, name, ...args);
+    if (!socket.emit('command', cfg.cncjs.port, name, ...args)) {
+        noteDropped(name, args);
+        return false;
+    }
     answerCommand();
     return true;
 }
@@ -478,6 +514,7 @@ let lastStatusAt = 0;
  * @returns {void}
  */
 function sendStatus(force) {
+    if (!cfg.device.send) return;
     const line = formatStatus(snapshot());
     const now = Date.now();
     const due = now - lastStatusAt >= cfg.status.intervalMs;
@@ -494,13 +531,14 @@ function sendStatus(force) {
  * Writes one line to the pendant's serial port.
  *
  * @param {string} text - the line, without terminator (a newline is added)
- * @param {boolean} [shouldLog=true] - print the line when -v is on
+ * @param {boolean} [should_log=false] - print the line when -v is on
  * @returns {boolean} false if the pendant port is not open
  */
-function sendToPendant(text, shouldLog=true) {
+function sendToPendant(text, should_log=false) {
+    if (!cfg.device.send) return false;
     const port = pendantPort;
     if (!port || !port.isOpen) return false;
-    if(shouldLog) log('cncjs -> ', 'pendant', text);
+    if(should_log) log('cncjs -> ', 'pendant', text);
     port.write(text + '\n', (err) => {
         if (err) noteError(err);
     });
@@ -605,7 +643,7 @@ function healthReport() {
         ok: health.pendant.connected && cncReady(),
         version: pkg.version,
         uptimeMs: now - health.startedAt,
-        pendant: Object.assign({}, health.pendant, { lastRxAgeMs: age(health.pendant.lastRx),
+        pendant: Object.assign({}, health.pendant, { sendEnabled: !!cfg.device.send, lastRxAgeMs: age(health.pendant.lastRx),
             lastTxAgeMs: age(health.pendant.lastTx) }),
         cncjs: health.cncjs,
         lastCommand: health.lastCommand,

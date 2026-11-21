@@ -120,13 +120,18 @@ Start from `cncjs-pendant.config.example.json`.
 |---|---|
 | `cncjs.port` | CNC controller port as CNCjs knows it (not the pendant) |
 | `cncjs.controllerType` | `Grbl` (Smoothie shares the state format) |
+| `cncjs.retryInterval` | ms before a failed or lost port open is retried (default 5000, 0 = never) |
+| `cncjs.openTimeout`, `cncjs.maxOpenTries` | ms to wait for CNCjs to answer an open request (5000) and how many unanswered requests are tolerated before the connection to CNCjs is rebuilt (3) |
+| `cncjs.keepaliveMs` | the open request is repeated this often (30000, 0 = off) to verify that CNCjs still has the bridge attached; no answer rebuilds the connection |
+| `cncjs.reopenOnClose` | reopen the CNC port when it is closed behind the bridge's back, e.g. from the CNCjs UI (default `true`). Set `false` if you want the UI's Close to release the machine |
 | `device.path` | pendant serial port: `/dev/pendant` (USB, with the udev rule) or `/dev/rfcomm0` (Bluetooth) |
 | `device.baudRate`, `device.settleMs` | pendant baud rate; pendant input is ignored this long after opening |
+| `device.send` | `false` (or `--no-pendant-send`): never write anything to the pendant, no status, `PONG` or `ERR`. Pendant to CNCjs keeps working. Useful when the firmware does not read from the serial port yet, or to rule the status stream out when debugging |
 | `device.hupcl`, `dtr`, `rts` | modem control line handling (the defaults are fine with the udev rule) |
 | `status.intervalMs`, `status.minGapMs` | status line at least every 100 ms, and at most every 25 ms when values change |
 | `status.pollAfterCommand` | ask Grbl for a fresh report after each pendant command |
 | `status.format` | `grbl` or `json` |
-| `jog.translate` | rewrite jogs like `G21G91X10F500` to `$J=...` so they do not leave Grbl in relative mode |
+| `jog.translate` | rewrite jogs like `G21G91X10F500` to `$J=...` so they do not leave Grbl in relative mode (default `true`; `false` or `--no-jog-translate` sends the pendant's lines as plain gcode, for comparing behavior) |
 | `http` | health endpoint (`enabled`, `host`, `port`) |
 | `log.max` | pendant log lines kept for the widget |
 
@@ -159,6 +164,15 @@ If no line arrives for about 500 ms, treat the bridge as gone.
 
 ## Troubleshooting
 
+- **CNCjs restarted or was down for a while.** The bridge rebuilds its connection by itself (new socket, new access
+  token, backoff of 1 to 10 s) and reattaches to the CNC port; the console shows `Disconnected`, `Reconnecting in ...`,
+  `Connected to ws://...` and `Connected to port ...`. No restart of the bridge is needed. Nothing is queued while the
+  connection is down, so a stale jog is never replayed afterwards.
+- **Commands from the pendant have no effect.** Look for `Dropped pendant command (...)` in the console. It says whether
+  the bridge is not connected to CNCjs or the CNC port is not open, and `/status` counts them in
+  `cncjs.droppedCommands`. The pendant also receives `ERR:CNCJS_NOT_READY`. If the bridge claims everything is fine but
+  CNCjs still ignores commands, the CNCjs log contains `Serial port "..." not accessible`.
+
 - **ESP32 reboots or enters download mode when the port is opened.** Linux raises DTR and RTS on the first open, and
   the auto-reset circuit turns that into a reset. Use the udev rule from `--usb-port`. A capacitor of about 1 uF from
   EN to GND on the board removes the problem at its source.
@@ -166,3 +180,30 @@ If no line arrives for about 500 ms, treat the bridge as gone.
   and counted in `/status` (`pendant.garbageLines`); wrong baud rate and a rebooting ESP32 look like that.
 - **`$$` and `$I` output at start.** Normal: CNCjs queries the controller when a client opens the CNC port.
 - **No WPos.** Grbl reports the work offset only every 10-30 status reports; the first WPos can take a few seconds.
+
+## Testing without hardware (pendant simulator)
+
+`tools/pendant-sim.js` emulates the handwheel on a serial port, so you can exercise the bridge from a dev machine (it lives in the repository only; it is not part of the npm package).
+
+Create a virtual serial pair and start the bridge on one end:
+
+```bash
+socat -d -d pty,raw,echo=0,link=/tmp/pendant-sim pty,raw,echo=0,link=/tmp/pendant-bridge
+cncjs-handwheel --pendant-port /tmp/pendant-bridge -v
+```
+
+Then attach the simulator to the other end:
+
+```bash
+node tools/pendant-sim.js --port /tmp/pendant-sim
+```
+
+Interactive keys: arrows = X/Y jog, PgUp/PgDn (or `u`/`j`) = Z jog, `1`-`4` = step 1/0.1/0.01/0.001, `h` = `$H`, space = `!`, `r` = `~`, `X` = Ctrl-X, `?`, `p` = PING, `l` = log line, `b` = burst of jogs in the last direction, `q` = quit. The status line shows state, WPos, tx/rx counters and the age of the last status.
+
+Script mode runs unattended and prints a one-line `SUMMARY`:
+
+```bash
+node tools/pendant-sim.js --port /tmp/pendant-sim --script "step:0.1, x+*500@500, wait:500, home, hold, resume"
+```
+
+Tokens: `x+ x- y+ y- z+ z-`, `x+*200@100` (200 jogs at 100/s), `step:N`, `feed:N`, `home hold resume reset status ping cancel`, `log:text`, `raw:LINE`, `wait:MS`.
