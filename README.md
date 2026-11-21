@@ -114,7 +114,7 @@ for example the Arduino `BluetoothSerial` library. A BLE-only device does not wo
 
 Precedence, lowest to highest: defaults, the `pendant` section of `~/.cncrc`, `~/.cncjs-handwheel.config`
 (or the file given with `--config`), command line options. CNCjs rewrites `.cncrc` itself, so a separate file is safer.
-Start from `cncjs-pendant.config.example.json`.
+Start from `cncjs-handwheel.config.example.json`.
 
 | Key | Meaning |
 |---|---|

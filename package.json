@@ -24,7 +24,7 @@
     "bin",
     "lib",
     "index.js",
-    "cncjs-pendant.config.example.json"
+    "cncjs-handwheel.config.example.json"
   ],
   "scripts": {
     "start": "node bin/cncjs-handwheel",
