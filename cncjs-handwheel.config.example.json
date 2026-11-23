@@ -19,7 +19,8 @@
     "send": true,
     "hupcl": false,
     "dtr": null,
-    "rts": null
+    "rts": null,
+    "power": { "line": null, "poweredWhen": "clear", "pollMs": 250, "debounceMs": 1000 }
   },
   "status": {
     "format": "grbl",

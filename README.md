@@ -128,6 +128,7 @@ Start from `cncjs-handwheel.config.example.json`.
 | `device.baudRate`, `device.settleMs` | pendant baud rate; pendant input is ignored this long after opening |
 | `device.send` | `false` (or `--no-pendant-send`): never write anything to the pendant, no status, `PONG` or `ERR`. Pendant to CNCjs keeps working. Useful when the firmware does not read from the serial port yet, or to rule the status stream out when debugging |
 | `device.hupcl`, `dtr`, `rts` | modem control line handling (the defaults are fine with the udev rule) |
+| `device.power` | `{line, poweredWhen, pollMs, debounceMs}`: detect that the handwheel is switched off while the USB cable is still plugged in, see "Detecting a switched-off handwheel". Off unless `line` is set |
 | `status.intervalMs`, `status.minGapMs` | status line at least every 400 ms (the heartbeat), and never more often than every 350 ms (about 3 per second); a burst of commands or position changes costs one line per gap, always carrying the latest values. Explicit `?` / `STATUS?` requests are answered at once |
 | `status.pollAfterCommand` | ask Grbl for a fresh report after pendant commands (at most one per `status.minGapMs`) |
 | `status.format` | `grbl` or `json` |
@@ -138,6 +139,40 @@ Start from `cncjs-handwheel.config.example.json`.
 | `jog.echo` | tag jog lines with `{echo: false}` as context (default `false`; other gcode is not tagged). CNCjs passes it on in its `serialport:write` event, so a console widget can hide the `feeder> $J=...` echo. Stock CNCjs ignores it (see "Quieting the CNCjs console") |
 | `http` | health endpoint (`enabled`, `host`, `port`) |
 | `log.max` | pendant log lines kept for the widget |
+
+## Detecting a switched-off handwheel
+
+A USB serial chip such as the CH340 is powered by the cable, so when the handwheel's own power switch only cuts the
+ESP32 (and display) the port stays open and the bridge cannot tell that nobody is listening. The way around is one
+wire: the firmware drives a spare GPIO high once it is running, and that GPIO is connected to a **modem input of the
+USB chip** (CTS#, DSR# or DCD#, whichever pin your chip has). The bridge reads that input; when the ESP32 has no power
+the pin is not driven and a pull-down resistor holds it low.
+
+Those inputs are active low, so a pin driven HIGH reads as *clear* and a pin pulled LOW reads as *set*. With the
+wiring above the default `poweredWhen: "clear"` is right. Config:
+
+```json
+"device": { "power": { "line": "cts" } }
+```
+
+| Key | Meaning |
+|---|---|
+| `line` | `cts`, `dsr` or `dcd`: the input that is wired to the handwheel (`null` = off, the default) |
+| `poweredWhen` | `clear` (default: pin high = switched on) or `set` (pin low = switched on, if you wired it the other way round) |
+| `pollMs`, `debounceMs` | read the line every 250 ms; a change must last 1000 ms to count (opening the port can reset the ESP32 and make the pin dip) |
+
+While the handwheel is off the bridge reports `pendant.powered: false` in `/status` (`null` = unknown, or not
+configured), ignores whatever the adapter's RX line picks up, writes nothing to it, drops the stored battery state and
+discards a jog that was being held back. The widget shows **Handwheel switched off** (grey) and `Off` in the glyph row.
+After switch-on the bridge ignores the ESP32's boot output for `device.settleMs`, as it does after opening the port.
+
+**Check the wiring first.** Stop the bridge (it holds the port) and run `node tools/probe-modem-lines.js /dev/pendant`
+from the repository. It prints CTS, DSR and DCD twice a second and marks changes; switch the handwheel off and on and
+the wired line must change and stay changed (`1` = pin low, `0` = pin high). A line that never moves is not wired or is
+not a pin of your chip; one that flickers is floating. USB only: a Bluetooth link has no modem lines, and the bridge
+turns the feature off with a message if the port cannot report them. GPIO2 is a strapping pin: low or floating at reset
+is what the ESP32 wants, so the pull-down is the right resistor, and the firmware should only drive it high once it has
+started.
 
 ## CNCjs widget
 
@@ -151,7 +186,7 @@ jog statistics and a live tail of the handwheel log.
 | green | handwheel connected, CNCjs socket up and machine port open |
 | amber | handwheel connected, but CNCjs is unreachable or the machine port is closed |
 | red | handwheel not connected |
-| grey | the widget cannot reach the bridge at all |
+| grey | the widget cannot reach the bridge at all, or the handwheel is plugged in but switched off (needs `device.power`) |
 
 The widget runs in your browser, not on the Pi, so it cannot use the bridge's `127.0.0.1:8001` directly. Two pieces
 are needed, both on the machine that runs CNCjs.
@@ -253,6 +288,12 @@ the machine moves) tracks the move. If no line arrives for about 1 second, treat
   EN to GND on the board removes the problem at its source.
 - **Nothing from the pendant.** Run with `-v`. Lines rejected as non-text are reported as `dropped non-text line`
   and counted in `/status` (`pendant.garbageLines`); wrong baud rate and a rebooting ESP32 look like that.
+- **The widget's log pane stays empty.** The pane shows the pendant's *log lines* only: lines that start with a
+  semicolon (`; text`). It also says how many lines the bridge has received and how many of them were log lines
+  (`/status` has the same numbers as `pendant.rxLines` and `pendant.logLines`; `/log` has the entries). Lines
+  without the semicolon are not log lines: the bridge sends them to the controller as gcode, so a firmware that
+  prints debug text on the same serial port must prefix it with `;`. Output from before the port settled
+  (`device.settleMs`) is discarded.
 - **`$$` and `$I` output at start.** Normal: CNCjs queries the controller when a client opens the CNC port.
 - **No WPos.** Grbl reports the work offset only every 10-30 status reports; the first WPos can take a few seconds.
 
