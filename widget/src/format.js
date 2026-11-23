@@ -51,3 +51,16 @@ export function coord(v) {
 export function clock(t) {
   return new Date(t).toLocaleTimeString([], { hour12: false });
 }
+
+/**
+ * Formats a number of seconds as "1h 05m", "25m" or "<1m".
+ *
+ * @param {number} sec
+ * @returns {string}
+ */
+export function eta(sec) {
+  const m = Math.round(sec / 60);
+  if (m < 1) return '<1m';
+  if (m < 60) return m + 'm';
+  return Math.floor(m / 60) + 'h ' + String(m % 60).padStart(2, '0') + 'm';
+}

@@ -3,6 +3,9 @@ import { useEffect, useState } from 'react';
 const params = new URLSearchParams(window.location.search);
 const token = params.get('token');
 
+/** `?debug=1` shows the widget's own expand/collapse button. */
+export const DEBUG = params.get('debug') === '1';
+
 /**
  * Announces the widget to CNCjs. CNCjs answers with its 'change' message and, when patched
  * (see the README), with the current full screen state.
@@ -60,8 +63,7 @@ function watchParentFullscreen(onChange) {
 /**
  * True while the CNCjs widget is shown full screen. Detected, in order, from the CNCjs page itself (same
  * origin only) and from a `{ action: { type: 'fullscreen', payload: { fullscreen } } }` message that a patched
- * CNCjs posts (see the README). With neither, it stays false and the in-widget expand button is the fallback.
- * `?mode=full` forces it on.
+ * CNCjs posts (see the README). With neither it stays false. `?mode=full` forces it on, and `?debug=1` adds an expand button.
  *
  * @returns {boolean}
  */

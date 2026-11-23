@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
 import Dial from './Dial';
+import PendantRow from './PendantRow';
 import { API_BASE, useBridge, linkState } from './bridge';
-import { useHostFullscreen } from './host';
+import { DEBUG, useHostFullscreen } from './host';
 import { ago, clock, coord, duration } from './format';
 
 /** One "label value" row. */
@@ -23,6 +24,22 @@ function Card({ title, children }) {
     </section>
   );
 }
+
+/** A counter: normal at zero and `nonzero` ('bad' red, 'good' none) otherwise, or the reverse for `zeroGood`. */
+function Num({ value, zeroGood }) {
+  const cls = zeroGood ? (value === 0 ? 'good' : '') : (value > 0 ? 'bad' : '');
+  return <b className={cls}>{value}</b>;
+}
+
+/** Joins counters as 1|2|3. */
+function Bar({ values, zeroGood }) {
+  return values.map((v, i) => (
+    <span key={i}>{i > 0 && <i>|</i>}<Num value={v} zeroGood={zeroGood} /></span>
+  ));
+}
+
+/** CSS class of the Grbl machine state in the status line. */
+const stateClass = (s) => (/^(Run|Jog|Home)/i.test(s) ? 'busy' : /^(Hold|Door)/i.test(s) ? 'warn' : /^Alarm/i.test(s) ? 'bad' : '');
 
 /** Auto-scrolling pendant log; stops following when the user scrolls up. */
 function Log({ entries }) {
@@ -72,6 +89,7 @@ function Details({ status, log, age }) {
         </Card>
         <Card title="Handwheel">
           <Row label="Port">{pendant.path || '–'}</Row>
+          {status.version && <Row label="Bridge">v{status.version}{status.uptimeMs !== undefined ? ', up ' + duration(status.uptimeMs) : ''}</Row>}
           <Row label="Last line in">{ago(age(pendant.lastRxAgeMs))}</Row>
           <Row label="Last line out">{ago(age(pendant.lastTxAgeMs))}</Row>
           <Row label="Lines in / out">{pendant.rxLines} / {pendant.txLines}</Row>
@@ -118,33 +136,37 @@ export default function App() {
   // Ages in the report are relative to the moment it was built; add the time since it arrived.
   const age = (ms) => (ms === null || ms === undefined ? null : ms + (Date.now() - lastOkAt));
 
-  let line = '';
-  if (status && !error) {
-    const s = status.status || {};
-    line = s.state || '';
-    if (status.jog && status.jog.inFlight) line += ' · jog ' + status.jog.inFlight + ' in flight';
-    if (status.pendant && status.pendant.connected && status.pendant.lastRxAgeMs !== undefined) {
-      line += ' · ' + ago(age(status.pendant.lastRxAgeMs));
-    }
-  } else if (error && lastOkAt) {
-    line = 'last seen ' + ago(Date.now() - lastOkAt);
-  }
+  const machineState = ((status && status.status && status.status.state) || '–').replace(/:\d+$/, ''); // Grbl's Hold:0 / Door:1 sub-state
+  // "Drop" adds the pendant lines the bridge could not use and the commands it could not hand to CNCjs.
+  const counts = status && status.pendant
+    ? [status.pendant.reconnects || 0, status.pendant.errors || 0,
+      (status.pendant.garbageLines || 0) + ((status.cncjs && status.cncjs.droppedCommands) || 0)]
+    : null;
 
   return (
     <div className={'widget level-' + link.level + (expanded ? ' expanded' : '')}>
       <header className="head">
-        <span className="icon"><Dial size={expanded ? 44 : 36} /></span>
+        <span className="icon"><Dial size={36} /></span>
         <span className="title">
           <strong>{link.text}</strong>
-          <small>{line}{expanded && status && !error ? (status.uptimeMs !== undefined ? ' · up ' + duration(status.uptimeMs) : '') + (status.version ? ' · v' + status.version : '') : ''}</small>
+          <small className="counts">
+            {status && !error ? (
+              <>
+                <span className={'mstate ' + stateClass(machineState)}>{machineState}</span>
+                {counts && <span><em>Reconn|Err|Drop</em> <Bar values={counts} /></span>}
+                {status.jog && <span><em>In flight|Held</em> <Bar values={[status.jog.inFlight || 0, status.jog.held ? 1 : 0]} zeroGood /></span>}
+              </>
+            ) : (error && lastOkAt ? 'last seen ' + ago(Date.now() - lastOkAt) : '')}
+          </small>
         </span>
-        {!hostFullscreen && (
+        {DEBUG && !hostFullscreen && (
           <button type="button" className="toggle" onClick={() => setManual(!manual)}
             aria-label={expanded ? 'Show less' : 'Show details'} aria-expanded={expanded} title={expanded ? 'Show less' : 'Show details'}>
             {expanded ? '▴' : '▾'}
           </button>
         )}
       </header>
+      {status && !error && <PendantRow pendant={status.pendant} />}
       {expanded && status && !error && <Details status={status} log={log} age={age} />}
       {expanded && error && <p className="hint">Cannot reach the bridge at <code>{API_BASE}</code> ({error}). Is the service running and the proxy route in place?</p>}
     </div>

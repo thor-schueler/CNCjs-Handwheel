@@ -210,6 +210,7 @@ Pendant to bridge:
 | `?` or `STATUS?` | immediate status line |
 | `PING` | answered with `PONG` |
 | `; text` | console log entry for the widget; never sent to the controller |
+| `[HW:bat=74,chg=0,eta=13200,st=ok]` | the pendant's own state for the widget, never sent to the controller. `bat` battery 0-100 %, `chg` 1 while charging, `eta` seconds until full (charging) or empty, `st` `ok`, `warn` or `err` (the widget then says "Check log"). Every key is optional (a key left out counts as unknown), unknown keys are ignored. Send it when something changes and at least every 30 s; it is dropped when the pendant disconnects |
 
 Bridge to pendant:
 

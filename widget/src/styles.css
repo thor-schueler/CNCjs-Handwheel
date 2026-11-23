@@ -71,3 +71,33 @@ code, .mono { font-family: "Segoe UI Mono", "SFMono-Medium", "SF Mono", Menlo, C
 .logline .time { color: var(--muted); }
 .empty, .hint { color: var(--muted); }
 .hint { margin: 8px 0 0; }
+
+/* status line */
+.title small { white-space: normal; overflow: visible; }
+.counts { display: flex; flex-wrap: wrap; gap: 2px 16px; margin-top: 2px; }
+.counts em { font-style: normal; color: var(--muted); margin-right: 2px; }
+.counts b { font-weight: 600; font-variant-numeric: tabular-nums; }
+.counts i { font-style: normal; color: var(--muted); margin: 0 2px; }
+.counts .good { color: var(--ok); }
+.counts .bad { color: var(--down); }
+.mstate { font-weight: 600; }
+.mstate.busy { color: var(--accent); }
+.mstate.warn { color: var(--warn); }
+.mstate.bad { color: var(--down); }
+
+/* pendant glyph row */
+.pend { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 18px; margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--border); }
+.g { display: inline-flex; align-items: center; gap: 6px; }
+.g small { color: var(--muted); font-size: 12px; }
+.g.muted { color: var(--muted); }
+.bat .pct { font-weight: 600; font-variant-numeric: tabular-nums; }
+.bat.ok svg { color: var(--ok); }
+.bat.mid svg { color: var(--warn); }
+.bat.low svg, .bat.low .pct { color: var(--down); }
+.st { margin-left: auto; }
+.st.s-ok { color: var(--ok); }
+.st.s-warn { color: var(--warn); }
+.st.s-err { color: var(--down); }
+.st.s-unk { color: var(--muted); }
+.st.s-warn small { color: var(--warn); font-weight: 600; }
+.st.s-err small { color: var(--down); font-weight: 600; }

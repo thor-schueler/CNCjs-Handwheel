@@ -29,6 +29,7 @@
 //     x+ x- y+ y- z+ z-   one jog with the current step      x+*200@100  200 jogs at 100 per second
 //     step:0.1  feed:2000  home  hold  resume  reset  status  ping  cancel
 //     log:text            send "; text"                      raw:LINE  send any line as it is
+//     hw:bat=74+chg=0+eta=13200+st=ok   send the pendant's own status report [HW:...]
 //     wait:500            wait 500 ms
 
 const readline = require('readline');
@@ -259,6 +260,7 @@ async function runScript(text) {
         else if ((m = /^wait:(\d+)$/.exec(tok))) await sleep(Number(m[1]));
         else if ((m = /^log:(.*)$/.exec(tok))) sendLine('; ' + m[1]);
         else if ((m = /^raw:(.*)$/.exec(tok))) sendLine(m[1]);
+        else if ((m = /^hw:(.*)$/.exec(tok))) sendLine('[HW:' + m[1].replace(/\+/g, ',') + ']');
         else if (simple[tok]) sendLine(simple[tok]);
         else { console.error('Unknown script token: ' + tok); quit(1); return; }
     }
