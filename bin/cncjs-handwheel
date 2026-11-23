@@ -50,7 +50,17 @@ const DEFAULTS = {
         // the DTR/RTS toggling around open/close can reset the ESP32 or drop it into download mode.
         hupcl: false,              // do NOT drop DTR/RTS when the port is closed
         dtr: null,                 // true/false = force DTR right after open, null = leave alone
-        rts: null                  // true/false = force RTS right after open, null = leave alone
+        rts: null,                 // true/false = force RTS right after open, null = leave alone
+
+        // "Is the handwheel switched on?" for a USB-powered adapter that stays alive when the handwheel is
+        // switched off. The handwheel drives one modem INPUT of the USB serial chip (CTS#, DSR# or DCD#),
+        // and the bridge reads it. Off by default (line: null). USB only; there is no such line over Bluetooth.
+        //   line: 'cts' | 'dsr' | 'dcd'  which input is wired to the handwheel
+        //   poweredWhen: 'clear' | 'set'  the line state that means "switched on". The inputs are active low:
+        //     a pin driven HIGH reads as clear, a pin pulled LOW reads as set. 'clear' = high means on
+        //   pollMs: how often the line is read
+        //   debounceMs: a change must last this long before it counts (opening the port can reset the ESP32)
+        power: { line: null, poweredWhen: 'clear', pollMs: 250, debounceMs: 1000 }
     },
     status: {
         format: 'grbl',            // 'grbl' -> <Idle|MPos:..|WPos:..|FS:..>   'json' -> {"t":"status",...}
@@ -166,6 +176,17 @@ if (cli.jogTranslate === false) cfg.jog.translate = false;
 
 if (!cfg.cncjs.port) { console.error('Missing CNC controller port (cncjs.port / --port)'); process.exit(1); }
 if (!cfg.device.path) { console.error('Missing pendant port (device.path / --pendant-port). Try --list'); process.exit(1); }
+if (cfg.device.power.line) {
+    cfg.device.power.line = String(cfg.device.power.line).toLowerCase();
+    if (!['cts', 'dsr', 'dcd'].includes(cfg.device.power.line)) {
+        console.error('device.power.line must be "cts", "dsr", "dcd" or null, not "' + cfg.device.power.line + '"');
+        process.exit(1);
+    }
+    if (!['clear', 'set'].includes(cfg.device.power.poweredWhen)) {
+        console.error('device.power.poweredWhen must be "clear" or "set", not "' + cfg.device.power.poweredWhen + '"');
+        process.exit(1);
+    }
+}
 
 // ---------------------------------------------------------------- state
 const store = { controller: { state: {}, settings: {} }, sender: { status: {} } };
@@ -173,7 +194,8 @@ const store = { controller: { state: {}, settings: {} }, sender: { status: {} } 
 const health = {
     startedAt: Date.now(),
     pendant: { path: cfg.device.path, connected: false, lastRx: null, lastTx: null, rxLines: 0, txLines: 0,
-        reconnects: 0, errors: 0, lastError: null, logLines: 0, garbageLines: 0, link: null, info: null },
+        reconnects: 0, errors: 0, lastError: null, logLines: 0, garbageLines: 0, link: null, info: null,
+        powered: null, powerError: null }, // powered: null = unknown or not configured, true / false = switched on / off
     cncjs: { socketConnected: false, portOpen: false, port: cfg.cncjs.port, controllerType: cfg.cncjs.controllerType,
         lastError: null, droppedCommands: 0 },
     jog: { sent: 0, merged: 0, discarded: 0, stalls: 0, cancels: 0, inFlight: 0, held: false, lastAt: null },
@@ -341,6 +363,11 @@ let lastReset = 0;
  */
 function onPendantData(buf) {
     const now = Date.now();
+    if (health.pendant.powered === false) { // switched off: whatever the adapter's RX line picks up is noise
+        rxBuf = '';
+        skipLine = false;
+        return;
+    }
     health.pendant.lastRx = now;
     if (now < ignoreUntil) {
         rxBuf = '';
@@ -812,7 +839,7 @@ function queueStatus() {
 function sendToPendant(text, should_log=false) {
     if (!cfg.device.send) return false;
     const port = pendantPort;
-    if (!port || !port.isOpen) return false;
+    if (!port || !port.isOpen || health.pendant.powered === false) return false;
     if(should_log) log('cncjs -> ', 'pendant', text);
     port.write(text + '\n', (err) => {
         if (err) noteError(err);
@@ -854,6 +881,89 @@ function scheduleReconnect() {
     }, cfg.device.reconnectMs);
 }
 
+// ---------------------------------------------------------------- handwheel power (modem line)
+let powerTimer = null;
+let powerBusy = false;
+let powerRaw = null;   // last reading (true = on), not yet debounced
+let powerSince = 0;    // when powerRaw last changed
+
+/**
+ * Stops reading the power line and forgets what it said (the state is unknown while the port is closed).
+ *
+ * @returns {void}
+ */
+function stopPowerWatch() {
+    clearInterval(powerTimer);
+    powerTimer = null;
+    powerBusy = false;
+    powerRaw = null;
+    health.pendant.powered = null;
+}
+
+/**
+ * Records a debounced change of the handwheel's power state.
+ *
+ * @param {boolean} on - true if the handwheel is switched on
+ * @returns {void}
+ */
+function setPowered(on) {
+    health.pendant.powered = on;
+    rxBuf = '';
+    skipLine = false;
+    if (on) {
+        // the ESP32 is booting: ignore its output like after opening the port
+        ignoreUntil = Date.now() + Number(cfg.device.settleMs || 0);
+    } else {
+        health.pendant.info = null; // a stale battery level is worse than none
+        discardHeldJog();           // switching the handwheel off must not let a held jog fire afterwards
+    }
+    console.log('Handwheel switched ' + (on ? 'on' : 'off'));
+}
+
+/**
+ * Reads the modem line once and applies the debounce.
+ *
+ * @param {SerialPort} port - the open pendant port
+ * @returns {void}
+ */
+function pollPower(port) {
+    if (powerBusy || !port.isOpen) return;
+    powerBusy = true;
+    port.get((err, signals) => {
+        powerBusy = false;
+        if (port !== pendantPort || !port.isOpen) return;
+        if (err) {
+            // e.g. Bluetooth (rfcomm) has no modem lines: say so once and stop asking
+            health.pendant.powerError = err.message;
+            console.error('Pendant power line cannot be read, power detection is off:', err.message);
+            stopPowerWatch();
+            return;
+        }
+        const set = !!(signals && signals[cfg.device.power.line]);
+        const on = cfg.device.power.poweredWhen === 'set' ? set : !set;
+        const now = Date.now();
+        if (on !== powerRaw) {
+            powerRaw = on;
+            powerSince = now;
+        }
+        if (health.pendant.powered !== on && now - powerSince >= Number(cfg.device.power.debounceMs || 0)) setPowered(on);
+    });
+}
+
+/**
+ * Starts polling the configured modem line of the pendant's port (nothing happens if device.power.line is null).
+ *
+ * @param {SerialPort} port - the open pendant port
+ * @returns {void}
+ */
+function startPowerWatch(port) {
+    stopPowerWatch();
+    health.pendant.powerError = null;
+    if (!cfg.device.power.line) return;
+    powerTimer = setInterval(() => pollPower(port), Math.max(50, Number(cfg.device.power.pollMs) || 250));
+    pollPower(port);
+}
+
 /**
  * Opens the pendant's serial port and wires up its events. Failures and closes schedule a reconnect.
  * After a successful open, pendant input is ignored for device.settleMs and a status line is sent.
@@ -880,6 +990,7 @@ function openPendant() {
     port.on('close', () => {
         health.pendant.connected = false;
         health.pendant.info = null; // a stale battery level is worse than none
+        stopPowerWatch();
         if (!shuttingDown) console.log('Pendant port closed');
         scheduleReconnect();
     });
@@ -902,6 +1013,7 @@ function openPendant() {
         health.pendant.link = detectLink(cfg.device.path);
         health.pendant.lastError = null;
         console.log('Pendant connected on ' + cfg.device.path);
+        startPowerWatch(port);
         sendStatus(true);
     });
 }
@@ -917,10 +1029,11 @@ function healthReport() {
     const now = Date.now();
     const age = (t) => (t ? now - t : null);
     return {
-        ok: health.pendant.connected && cncReady(),
+        ok: health.pendant.connected && health.pendant.powered !== false && cncReady(),
         version: pkg.version,
         uptimeMs: now - health.startedAt,
-        pendant: Object.assign({}, health.pendant, { sendEnabled: !!cfg.device.send, lastRxAgeMs: age(health.pendant.lastRx),
+        pendant: Object.assign({}, health.pendant, { sendEnabled: !!cfg.device.send, powerDetect: !!cfg.device.power.line,
+            lastRxAgeMs: age(health.pendant.lastRx),
             lastTxAgeMs: age(health.pendant.lastTx),
             info: health.pendant.info && Object.assign({}, health.pendant.info, { ageMs: age(health.pendant.info.at) }) }),
         cncjs: health.cncjs,
@@ -964,6 +1077,7 @@ function shutdown() {
     if (shuttingDown) return;
     shuttingDown = true;
     clearInterval(statusTimer);
+    clearInterval(powerTimer);
     clearInterval(jogTimer);
     clearTimeout(cancelTimer);
     clearTimeout(reconnectTimer);

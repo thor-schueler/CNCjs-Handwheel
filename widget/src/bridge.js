@@ -108,6 +108,8 @@ export function linkState(status, error) {
   if (!status) return { level: 'unknown', text: 'Connecting…' };
   // Older bridge versions report fewer fields; treat a missing one as "not connected".
   if (!(status.pendant && status.pendant.connected)) return { level: 'down', text: 'Handwheel disconnected' };
+  // Plugged in but switched off (the bridge reads a power line; absent or null on older bridges / when not configured).
+  if (status.pendant.powered === false) return { level: 'offline', text: 'Handwheel switched off' };
   if (!(status.cncjs && status.cncjs.socketConnected)) return { level: 'warn', text: 'CNCjs not reachable' };
   if (!status.cncjs.portOpen) return { level: 'warn', text: 'Machine port closed' };
   return { level: 'ok', text: 'Handwheel connected' };

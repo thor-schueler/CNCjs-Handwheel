@@ -18,7 +18,8 @@ const INDICATOR_TEXT = { ok: 'OK', warn: 'Check log', err: 'Check log' };
  */
 export default function PendantRow({ pendant }) {
   const up = !!(pendant && pendant.connected);
-  const info = up && pendant.info ? pendant.info : null;
+  const off = up && pendant.powered === false; // plugged in, switched off
+  const info = up && !off && pendant.info ? pendant.info : null;
   const link = up ? pendant.link : null;
   const hasBat = !!info && info.bat !== undefined;
   const state = info && info.st ? info.st : null;
@@ -36,7 +37,7 @@ export default function PendantRow({ pendant }) {
       </span>
       <span className={'g st s-' + (state || 'unk')}>
         <Indicator kind={state} />
-        <small>{state ? INDICATOR_TEXT[state] : up ? 'No status' : 'No data'}</small>
+        <small>{state ? INDICATOR_TEXT[state] : off ? 'Off' : up ? 'No status' : 'No data'}</small>
       </span>
     </div>
   );

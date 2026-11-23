@@ -52,7 +52,7 @@ const JOG_HOLD_MS = 700;
 const stateClass = (s) => (/^(Run|Jog|Home)/i.test(s) ? 'busy' : /^(Hold|Door)/i.test(s) ? 'warn' : /^Alarm/i.test(s) ? 'bad' : '');
 
 /** Auto-scrolling pendant log; stops following when the user scrolls up. */
-function Log({ entries, height, boxRef }) {
+function Log({ entries, height, boxRef, emptyNote }) {
   const own = useRef(null);
   const box = boxRef || own;
   const follow = useRef(true);
@@ -70,7 +70,7 @@ function Log({ entries, height, boxRef }) {
   return (
     <div className="log" ref={box} style={height ? { height } : undefined} onScroll={onScroll} role="log" aria-label="Handwheel log">
       {entries.length === 0
-        ? <div className="empty">No log lines from the handwheel yet.</div>
+        ? <div className="empty">No log lines from the handwheel yet.{emptyNote ? ' ' + emptyNote : ''}</div>
         : entries.map((e) => (
           <div key={e.id} className="logline"><span className="time">{clock(e.t)}</span> {e.text}</div>
         ))}
@@ -100,6 +100,9 @@ function Details({ status, log, age, machineState, logHeight, logRef }) {
         </Card>
         <Card title="Handwheel">
           <Row label="Port">{pendant.path || '–'}</Row>
+          {pendant.powerDetect && (
+            <Row label="Power">{pendant.powered === true ? 'on' : pendant.powered === false ? 'switched off' : pendant.powerError ? 'unreadable' : 'checking…'}</Row>
+          )}
           {status.version && <Row label="Bridge">v{status.version}{status.uptimeMs !== undefined ? ', up ' + duration(status.uptimeMs) : ''}</Row>}
           <Row label="Last line in">{ago(age(pendant.lastRxAgeMs))}</Row>
           <Row label="Last line out">{ago(age(pendant.lastTxAgeMs))}</Row>
@@ -133,7 +136,9 @@ function Details({ status, log, age, machineState, logHeight, logRef }) {
       </div>
       <section className="card logcard">
         <h3>Handwheel log</h3>
-        <Log entries={log} height={logHeight} boxRef={logRef} />
+        <Log entries={log} height={logHeight} boxRef={logRef}
+          emptyNote={'The bridge has received ' + (pendant.rxLines || 0) + ' lines from it, ' + (pendant.logLines || 0)
+            + ' of them log lines (log lines start with a semicolon).'} />
       </section>
     </>
   );
