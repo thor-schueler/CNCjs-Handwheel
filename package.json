@@ -1,6 +1,6 @@
 {
   "name": "cncjs-handwheel",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "CNCjs pendant bridge for a serial (USB/Bluetooth) ESP32 CNC handwheel",
   "keywords": [
     "cncjs",
