@@ -52,45 +52,55 @@ function Log({ entries }) {
 
 /** The detail view: machine, pendant, CNCjs and jog statistics plus the pendant log. */
 function Details({ status, log, age }) {
-  const { pendant, cncjs, jog, lastCommand } = status;
-  const s = status.status;
+  // Everything but the link state is optional: older bridge versions report fewer fields.
+  const { pendant = {}, cncjs = {}, jog, lastCommand } = status;
+  const s = status.status || {};
   const sender = s.sender || {};
+  const wpos = s.wpos;
   return (
     <>
       <div className="cards">
         <Card title="Machine">
-          <Row label="State">{s.state}</Row>
-          {s.wpos && ['x', 'y', 'z'].map((a) => (
-            <Row key={a} label={'Work ' + a.toUpperCase()}><span className="mono">{coord(s.wpos[a])}</span></Row>
+          <Row label="State">{s.state || '–'}</Row>
+          {wpos && ['x', 'y', 'z'].map((a) => (
+            <Row key={a} label={'Work ' + a.toUpperCase()}><span className="mono">{coord(wpos[a])}</span></Row>
           ))}
-          {s.feed !== null && <Row label="Feed / spindle">{s.feed} / {s.spindle === null ? '–' : s.spindle}</Row>}
+          {s.feed !== null && s.feed !== undefined && (
+            <Row label="Feed / spindle">{s.feed} / {s.spindle === null || s.spindle === undefined ? '–' : s.spindle}</Row>
+          )}
           {sender.name && <Row label="Job">{sender.name} {sender.sent}/{sender.total}{sender.hold ? ' (hold)' : ''}</Row>}
         </Card>
         <Card title="Handwheel">
-          <Row label="Port">{pendant.path}</Row>
+          <Row label="Port">{pendant.path || '–'}</Row>
           <Row label="Last line in">{ago(age(pendant.lastRxAgeMs))}</Row>
           <Row label="Last line out">{ago(age(pendant.lastTxAgeMs))}</Row>
           <Row label="Lines in / out">{pendant.rxLines} / {pendant.txLines}</Row>
           <Row label="Reconnects">{pendant.reconnects}</Row>
           <Row label="Errors">{pendant.errors}{pendant.lastError ? ' – ' + pendant.lastError : ''}</Row>
           <Row label="Dropped lines">{pendant.garbageLines}</Row>
-          <Row label="Status to pendant">{pendant.sendEnabled ? 'on' : 'off'}</Row>
+          {pendant.sendEnabled !== undefined && <Row label="Status to pendant">{pendant.sendEnabled ? 'on' : 'off'}</Row>}
         </Card>
         <Card title="CNCjs">
           <Row label="Socket">{cncjs.socketConnected ? 'connected' : 'down'}</Row>
           <Row label="Machine port">{cncjs.portOpen ? 'open' : 'closed'}</Row>
-          <Row label="Device">{cncjs.port}</Row>
-          <Row label="Controller">{cncjs.controllerType}</Row>
+          <Row label="Device">{cncjs.port || '–'}</Row>
+          <Row label="Controller">{cncjs.controllerType || '–'}</Row>
           <Row label="Dropped commands">{cncjs.droppedCommands}</Row>
           {cncjs.lastError && <Row label="Last error">{cncjs.lastError}</Row>}
         </Card>
-        <Card title="Jogging">
-          <Row label="Sent / merged">{jog.sent} / {jog.merged}</Row>
-          <Row label="Discarded">{jog.discarded}</Row>
-          <Row label="In flight">{jog.inFlight}{jog.held ? ' (+1 held)' : ''}</Row>
-          <Row label="Cancels / stalls">{jog.cancels} / {jog.stalls}</Row>
-          {lastCommand && <Row label="Last command"><span className="mono">{lastCommand.name}</span> {ago(Date.now() - lastCommand.at)}</Row>}
-        </Card>
+        {(jog || lastCommand) && (
+          <Card title="Jogging">
+            {jog && (
+              <>
+                <Row label="Sent / merged">{jog.sent} / {jog.merged}</Row>
+                <Row label="Discarded">{jog.discarded}</Row>
+                <Row label="In flight">{jog.inFlight}{jog.held ? ' (+1 held)' : ''}</Row>
+                <Row label="Cancels / stalls">{jog.cancels} / {jog.stalls}</Row>
+              </>
+            )}
+            {lastCommand && <Row label="Last command"><span className="mono">{lastCommand.name}</span> {ago(Date.now() - lastCommand.at)}</Row>}
+          </Card>
+        )}
       </div>
       <h3 className="logtitle">Handwheel log</h3>
       <Log entries={log} />
@@ -110,10 +120,12 @@ export default function App() {
 
   let line = '';
   if (status && !error) {
-    const s = status.status;
-    line = s.state;
-    if (status.jog.inFlight) line += ' · jog ' + status.jog.inFlight + ' in flight';
-    if (status.pendant.connected) line += ' · ' + ago(age(status.pendant.lastRxAgeMs));
+    const s = status.status || {};
+    line = s.state || '';
+    if (status.jog && status.jog.inFlight) line += ' · jog ' + status.jog.inFlight + ' in flight';
+    if (status.pendant && status.pendant.connected && status.pendant.lastRxAgeMs !== undefined) {
+      line += ' · ' + ago(age(status.pendant.lastRxAgeMs));
+    }
   } else if (error && lastOkAt) {
     line = 'last seen ' + ago(Date.now() - lastOkAt);
   }
@@ -124,7 +136,7 @@ export default function App() {
         <span className="icon"><Dial size={expanded ? 44 : 36} /></span>
         <span className="title">
           <strong>{link.text}</strong>
-          <small>{line}{expanded && status && !error ? ' · up ' + duration(status.uptimeMs) + ' · v' + status.version : ''}</small>
+          <small>{line}{expanded && status && !error ? (status.uptimeMs !== undefined ? ' · up ' + duration(status.uptimeMs) : '') + (status.version ? ' · v' + status.version : '') : ''}</small>
         </span>
         {!hostFullscreen && (
           <button type="button" className="toggle" onClick={() => setManual(!manual)}

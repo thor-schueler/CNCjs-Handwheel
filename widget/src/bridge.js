@@ -103,8 +103,9 @@ export function useBridge({ withLog, intervalMs = 1000, logMax = 300 }) {
 export function linkState(status, error) {
   if (error) return { level: 'offline', text: 'Bridge unreachable' };
   if (!status) return { level: 'unknown', text: 'Connecting…' };
-  if (!status.pendant.connected) return { level: 'down', text: 'Handwheel disconnected' };
-  if (!status.cncjs.socketConnected) return { level: 'warn', text: 'CNCjs not reachable' };
+  // Older bridge versions report fewer fields; treat a missing one as "not connected".
+  if (!(status.pendant && status.pendant.connected)) return { level: 'down', text: 'Handwheel disconnected' };
+  if (!(status.cncjs && status.cncjs.socketConnected)) return { level: 'warn', text: 'CNCjs not reachable' };
   if (!status.cncjs.portOpen) return { level: 'warn', text: 'Machine port closed' };
   return { level: 'ok', text: 'Handwheel connected' };
 }
