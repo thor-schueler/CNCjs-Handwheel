@@ -183,10 +183,13 @@ URL parameters (append them to the widget URL, e.g. `/handwheel/?theme=dark`):
 | `theme` | auto | `light` or `dark`; by default taken from the CNCjs page, else from the OS |
 | `mode` | | `full` starts expanded |
 
-**Fullscreen.** Stock CNCjs does not tell a custom widget that it is shown fullscreen, so until it does the widget
-has its own expand button. The repository's `tools/cncjs-custom-widget-fullscreen.diff` (11 lines in the CNCjs
-`Custom` widget) posts the state to the widget; with it the widget expands and collapses with CNCjs's own
-fullscreen button and hides its own.
+**Fullscreen.** When the widget is served from the same origin as CNCjs (the setups above), it watches CNCjs's
+widget container and expands and collapses with CNCjs's own fullscreen button; its own expand button then hides.
+This relies on the CSS class CNCjs puts on a fullscreen widget, so a CNCjs refactor can break it; the widget then
+just keeps its own expand button. Where the widget is cross-origin (the Vite dev server) it cannot look at the
+page, so use the expand button or `?mode=full`. A sturdier alternative is `tools/cncjs-custom-widget-fullscreen.diff`
+(11 lines in the CNCjs `Custom` widget): the patched CNCjs posts the fullscreen state to the widget, which listens
+for it in every setup. It is optional.
 
 **Developing the widget.** `npm run dev:widget` starts a Vite dev server that forwards `/handwheel-api` to a bridge
 on `127.0.0.1:8001` (override with `HANDWHEEL_BRIDGE=http://host:port`). `npm run build:widget` builds `widget/dist`;

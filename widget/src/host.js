@@ -36,9 +36,32 @@ export function reportSize() {
 }
 
 /**
- * True while the CNCjs widget is shown full screen. Stock CNCjs does not tell custom widgets, so this
- * stays false unless CNCjs posts `{ action: { type: 'fullscreen', payload: { fullscreen } } }`
- * (see the README); the in-widget expand button is the fallback.
+ * Watches the CNCjs widget container in the parent page for the class CNCjs puts on it while it is shown
+ * full screen. Only possible when the widget is served from the same origin as CNCjs; returns null otherwise.
+ *
+ * @param {function(boolean): void} onChange - called with the current state now and on every change
+ * @returns {?function(): void} stops watching, or null if the parent page cannot be inspected
+ */
+function watchParentFullscreen(onChange) {
+  try {
+    const region = window.frameElement && window.frameElement.closest('[role="region"]');
+    if (!region) return null;
+    // CSS-modules class such as "...Widget-index__widget-fullscreen--x1y2z"
+    const read = () => /widget-fullscreen/.test(region.className);
+    onChange(read());
+    const observer = new MutationObserver(() => onChange(read()));
+    observer.observe(region, { attributes: true, attributeFilter: ['class'] });
+    return () => observer.disconnect();
+  } catch (err) {
+    return null; // cross-origin parent
+  }
+}
+
+/**
+ * True while the CNCjs widget is shown full screen. Detected, in order, from the CNCjs page itself (same
+ * origin only) and from a `{ action: { type: 'fullscreen', payload: { fullscreen } } }` message that a patched
+ * CNCjs posts (see the README). With neither, it stays false and the in-widget expand button is the fallback.
+ * `?mode=full` forces it on.
  *
  * @returns {boolean}
  */
@@ -53,7 +76,11 @@ export function useHostFullscreen() {
       }
     };
     window.addEventListener('message', onMessage);
-    return () => window.removeEventListener('message', onMessage);
+    const stopWatching = params.get('mode') === 'full' ? null : watchParentFullscreen(setFullscreen);
+    return () => {
+      window.removeEventListener('message', onMessage);
+      if (stopWatching) stopWatching();
+    };
   }, []);
   return fullscreen;
 }
