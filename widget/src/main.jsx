@@ -21,6 +21,8 @@ class ErrorBoundary extends Component {
 }
 
 document.documentElement.dataset.theme = detectTheme();
+// Inside CNCjs the iframe is sized to its content, so it never needs a scroll bar of its own.
+if (window.parent !== window) document.documentElement.classList.add('embedded');
 reportSize();
 announce();
 

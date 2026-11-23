@@ -1,8 +1,8 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import Dial from './Dial';
 import PendantRow from './PendantRow';
 import { API_BASE, useBridge, linkState } from './bridge';
-import { DEBUG, useHostFullscreen } from './host';
+import { DEBUG, useHostFullscreen, useHostHeight } from './host';
 import { ago, clock, coord, duration } from './format';
 
 /** One "label value" row. */
@@ -20,23 +20,30 @@ function Card({ title, children }) {
   return (
     <section className="card">
       <h3>{title}</h3>
-      {children}
+      <div className="body">{children}</div>
     </section>
   );
 }
 
-/** A counter: normal at zero and `nonzero` ('bad' red, 'good' none) otherwise, or the reverse for `zeroGood`. */
-function Num({ value, zeroGood }) {
-  const cls = zeroGood ? (value === 0 ? 'good' : '') : (value > 0 ? 'bad' : '');
-  return <b className={cls}>{value}</b>;
+/**
+ * A counter. kind 'bad': red when not zero. kind 'good': green when zero. kind 'plain' (default): never coloured.
+ */
+function Num({ value, kind = 'plain' }) {
+  const n = Number(value) || 0;
+  const cls = kind === 'bad' ? (n > 0 ? 'bad' : '') : kind === 'good' ? (n === 0 ? 'good' : '') : '';
+  return <b className={cls}>{value === undefined || value === null ? '–' : value}</b>;
 }
 
-/** Joins counters as 1|2|3. */
-function Bar({ values, zeroGood }) {
-  return values.map((v, i) => (
-    <span key={i}>{i > 0 && <i>|</i>}<Num value={v} zeroGood={zeroGood} /></span>
+/** Joins counters as 1|2|3; each item is `[value, kind]`. */
+function Bar({ items }) {
+  return items.map(([v, kind], i) => (
+    <span key={i}>{i > 0 && <i>|</i>}<Num value={v} kind={kind} /></span>
   ));
 }
+
+/** Smallest height of the log pane when it is fitted to the screen, and the room left below for the iframe's baseline gap. */
+const MIN_LOG_HEIGHT = 120;
+const FIT_SLACK = 6;
 
 /** How long "Jog" stays up after the last jog the wheel asked for. */
 const JOG_HOLD_MS = 700;
@@ -45,8 +52,9 @@ const JOG_HOLD_MS = 700;
 const stateClass = (s) => (/^(Run|Jog|Home)/i.test(s) ? 'busy' : /^(Hold|Door)/i.test(s) ? 'warn' : /^Alarm/i.test(s) ? 'bad' : '');
 
 /** Auto-scrolling pendant log; stops following when the user scrolls up. */
-function Log({ entries }) {
-  const box = useRef(null);
+function Log({ entries, height, boxRef }) {
+  const own = useRef(null);
+  const box = boxRef || own;
   const follow = useRef(true);
 
   useEffect(() => {
@@ -60,7 +68,7 @@ function Log({ entries }) {
   };
 
   return (
-    <div className="log" ref={box} onScroll={onScroll} role="log" aria-label="Handwheel log">
+    <div className="log" ref={box} style={height ? { height } : undefined} onScroll={onScroll} role="log" aria-label="Handwheel log">
       {entries.length === 0
         ? <div className="empty">No log lines from the handwheel yet.</div>
         : entries.map((e) => (
@@ -71,7 +79,7 @@ function Log({ entries }) {
 }
 
 /** The detail view: machine, pendant, CNCjs and jog statistics plus the pendant log. */
-function Details({ status, log, age }) {
+function Details({ status, log, age, machineState, logHeight, logRef }) {
   // Everything but the link state is optional: older bridge versions report fewer fields.
   const { pendant = {}, cncjs = {}, jog, lastCommand } = status;
   const s = status.status || {};
@@ -81,7 +89,7 @@ function Details({ status, log, age }) {
     <>
       <div className="cards">
         <Card title="Machine">
-          <Row label="State">{s.state || '–'}</Row>
+          <Row label="State"><span className={'mstate ' + stateClass(machineState)}>{machineState}</span></Row>
           {wpos && ['x', 'y', 'z'].map((a) => (
             <Row key={a} label={'Work ' + a.toUpperCase()}><span className="mono">{coord(wpos[a])}</span></Row>
           ))}
@@ -96,9 +104,9 @@ function Details({ status, log, age }) {
           <Row label="Last line in">{ago(age(pendant.lastRxAgeMs))}</Row>
           <Row label="Last line out">{ago(age(pendant.lastTxAgeMs))}</Row>
           <Row label="Lines in / out">{pendant.rxLines} / {pendant.txLines}</Row>
-          <Row label="Reconnects">{pendant.reconnects}</Row>
-          <Row label="Errors">{pendant.errors}{pendant.lastError ? ' – ' + pendant.lastError : ''}</Row>
-          <Row label="Dropped lines">{pendant.garbageLines}</Row>
+          <Row label="Reconnects"><Num value={pendant.reconnects} kind="bad" /></Row>
+          <Row label="Errors"><Num value={pendant.errors} kind="bad" />{pendant.lastError ? <span className="bad"> – {pendant.lastError}</span> : null}</Row>
+          <Row label="Dropped lines"><Num value={pendant.garbageLines} kind="bad" /></Row>
           {pendant.sendEnabled !== undefined && <Row label="Status to pendant">{pendant.sendEnabled ? 'on' : 'off'}</Row>}
         </Card>
         <Card title="CNCjs">
@@ -106,25 +114,27 @@ function Details({ status, log, age }) {
           <Row label="Machine port">{cncjs.portOpen ? 'open' : 'closed'}</Row>
           <Row label="Device">{cncjs.port || '–'}</Row>
           <Row label="Controller">{cncjs.controllerType || '–'}</Row>
-          <Row label="Dropped commands">{cncjs.droppedCommands}</Row>
-          {cncjs.lastError && <Row label="Last error">{cncjs.lastError}</Row>}
+          <Row label="Dropped commands"><Num value={cncjs.droppedCommands} kind="bad" /></Row>
+          {cncjs.lastError && <Row label="Last error"><span className="bad">{cncjs.lastError}</span></Row>}
         </Card>
         {(jog || lastCommand) && (
           <Card title="Jogging">
             {jog && (
               <>
-                <Row label="Sent / merged">{jog.sent} / {jog.merged}</Row>
-                <Row label="Discarded">{jog.discarded}</Row>
-                <Row label="In flight">{jog.inFlight}{jog.held ? ' (+1 held)' : ''}</Row>
-                <Row label="Cancels / stalls">{jog.cancels} / {jog.stalls}</Row>
+                <Row label="Sent | merged"><Bar items={[[jog.sent], [jog.merged]]} /></Row>
+                <Row label="Discarded"><Num value={jog.discarded} /></Row>
+                <Row label="In flight | held"><Bar items={[[jog.inFlight || 0, 'good'], [jog.held ? 1 : 0, 'good']]} /></Row>
+                <Row label="Cancels | stalls"><Bar items={[[jog.cancels], [jog.stalls, 'bad']]} /></Row>
               </>
             )}
             {lastCommand && <Row label="Last command"><span className="mono">{lastCommand.name}</span> {ago(Date.now() - lastCommand.at)}</Row>}
           </Card>
         )}
       </div>
-      <h3 className="logtitle">Handwheel log</h3>
-      <Log entries={log} />
+      <section className="card logcard">
+        <h3>Handwheel log</h3>
+        <Log entries={log} height={logHeight} boxRef={logRef} />
+      </section>
     </>
   );
 }
@@ -153,8 +163,21 @@ export default function App() {
       (status.pendant.garbageLines || 0) + ((status.cncjs && status.cncjs.droppedCommands) || 0)]
     : null;
 
+  // Full screen: the iframe is exactly as tall as its content, so a log of fixed height makes the CNCjs widget
+  // scroll whenever the screen is shorter than the content, and leaves empty space when it is taller. Make the
+  // log take up whatever height is left instead (same origin only; elsewhere it keeps its default height).
+  const rootRef = useRef(null);
+  const logRef = useRef(null);
+  const availHeight = useHostHeight(hostFullscreen);
+  const [logHeight, setLogHeight] = useState(null);
+  useLayoutEffect(() => {
+    const fit = hostFullscreen && availHeight !== null && rootRef.current && logRef.current;
+    const next = fit ? Math.max(MIN_LOG_HEIGHT, Math.floor(availHeight - (rootRef.current.offsetHeight - logRef.current.offsetHeight) - FIT_SLACK)) : null;
+    if (next !== logHeight) setLogHeight(next);
+  });
+
   return (
-    <div className={'widget level-' + link.level + (expanded ? ' expanded' : '')}>
+    <div ref={rootRef} className={'widget level-' + link.level + (expanded ? ' expanded' : '')}>
       <header className="head">
         <span className="icon"><Dial size={36} /></span>
         <span className="title">
@@ -163,8 +186,8 @@ export default function App() {
             {status && !error ? (
               <>
                 <span className={'mstate ' + stateClass(machineState)}>{machineState}</span>
-                {counts && <span><em>Reconn|Err|Drop</em> <Bar values={counts} /></span>}
-                {status.jog && <span><em>In flight|Held</em> <Bar values={[status.jog.inFlight || 0, status.jog.held ? 1 : 0]} zeroGood /></span>}
+                {counts && <span><em>Reconn|Err|Drop</em> <Bar items={counts.map((v) => [v, 'bad'])} /></span>}
+                {status.jog && <span><em>In flight|Held</em> <Bar items={[[status.jog.inFlight || 0, 'good'], [status.jog.held ? 1 : 0, 'good']]} /></span>}
               </>
             ) : (error && lastOkAt ? 'last seen ' + ago(Date.now() - lastOkAt) : '')}
           </small>
@@ -177,7 +200,9 @@ export default function App() {
         )}
       </header>
       {status && !error && <PendantRow pendant={status.pendant} />}
-      {expanded && status && !error && <Details status={status} log={log} age={age} />}
+      {expanded && status && !error && (
+        <Details status={status} log={log} age={age} machineState={machineState} logHeight={logHeight} logRef={logRef} />
+      )}
       {expanded && error && <p className="hint">Cannot reach the bridge at <code>{API_BASE}</code> ({error}). Is the service running and the proxy route in place?</p>}
     </div>
   );

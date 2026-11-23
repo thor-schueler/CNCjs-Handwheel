@@ -88,6 +88,36 @@ export function useHostFullscreen() {
 }
 
 /**
+ * Height available to the widget's content while CNCjs shows it full screen: the CNCjs widget box minus its
+ * header. Needs a same-origin parent page (null otherwise, or when not `active`).
+ *
+ * @param {boolean} active - only measure while full screen
+ * @returns {?number} pixels
+ */
+export function useHostHeight(active) {
+  const [height, setHeight] = useState(null);
+  useEffect(() => {
+    if (!active) {
+      setHeight(null);
+      return undefined;
+    }
+    try {
+      const region = window.frameElement && window.frameElement.closest('[role="region"]');
+      if (!region) return undefined;
+      const header = region.querySelector('[class*="widget-header"]');
+      const read = () => setHeight(region.clientHeight - (header ? header.offsetHeight : 34));
+      read();
+      const observer = new ResizeObserver(read);
+      observer.observe(region);
+      return () => observer.disconnect();
+    } catch (err) {
+      return undefined; // cross-origin parent
+    }
+  }, [active]);
+  return height;
+}
+
+/**
  * Picks light or dark: `?theme=` wins, then a "dark" class or data attribute on the CNCjs page's <html>
  * (readable because the widget is served from the same origin), then the OS preference.
  *

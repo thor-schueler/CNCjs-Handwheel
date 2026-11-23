@@ -187,7 +187,7 @@ URL parameters (append them to the widget URL, e.g. `/handwheel/?theme=dark`):
 
 **Fullscreen.** When the widget is served from the same origin as CNCjs (the setups above), it watches CNCjs's
 widget container and expands and collapses with CNCjs's own fullscreen button; its own expand button then hides.
-This relies on the CSS class CNCjs puts on a fullscreen widget, so a CNCjs refactor can break it; the widget then
+Fullscreen, the log pane takes the height that is left, so the CNCjs widget only scrolls when the screen is too short for the cards. This relies on the CSS class CNCjs puts on a fullscreen widget, so a CNCjs refactor can break it; the widget then
 just keeps its own expand button. Where the widget is cross-origin (the Vite dev server) it cannot look at the
 page, so use the expand button or `?mode=full`. A sturdier alternative is `tools/cncjs-custom-widget-fullscreen.diff`
 (11 lines in the CNCjs `Custom` widget): the patched CNCjs posts the fullscreen state to the widget, which listens
