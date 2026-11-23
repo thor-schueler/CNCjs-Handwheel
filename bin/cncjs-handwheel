@@ -83,6 +83,7 @@ program
     .name('cncjs-handwheel')
     .version(pkg.version)
     .option('-l, --list', 'list available serial ports then exit')
+    .option('--widget-path', 'print the directory of the built CNCjs widget (for cncjs --mount) then exit')
     .option('-c, --config <file>', 'config file (default: ' + DEFAULT_CONFIG_FILE + ' if present)')
     .option('-s, --secret <secret>', 'CNCjs secret (default: $CNCJS_SECRET or ~/.cncrc)')
     .option('-p, --port <port>', 'CNC controller port as known to CNCjs, e.g. /dev/ttyUSB0')
@@ -98,6 +99,16 @@ program
     .option('--no-jog-translate', 'send pendant jogs as plain gcode instead of $J= (same as jog.translate: false)');
 program.parse(process.argv);
 const cli = program.opts();
+
+if (cli.widgetPath) {
+    const dir = path.join(__dirname, '..', 'widget', 'dist');
+    if (!fs.existsSync(path.join(dir, 'index.html'))) {
+        console.error('The widget is not built: ' + dir + ' has no index.html. Run `npm run build:widget` in the package directory.');
+        process.exit(1);
+    }
+    console.log(dir);
+    process.exit(0);
+}
 
 /**
  * Tells whether a value is a plain object (not null, not an array).

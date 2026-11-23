@@ -24,12 +24,15 @@
     "bin",
     "lib",
     "index.js",
-    "cncjs-handwheel.config.example.json"
+    "cncjs-handwheel.config.example.json",
+    "widget/dist"
   ],
   "scripts": {
     "start": "node bin/cncjs-handwheel",
     "check": "node --check index.js && node --check bin/cncjs-handwheel && node --check lib/service.js",
-    "prepublishOnly": "npm run check"
+    "prepublishOnly": "npm run check && npm run build:widget",
+    "build:widget": "npm install --prefix widget && npm run build --prefix widget",
+    "dev:widget": "npm run dev --prefix widget"
   },
   "engines": {
     "node": ">=20"

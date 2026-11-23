@@ -139,6 +139,60 @@ Start from `cncjs-handwheel.config.example.json`.
 | `http` | health endpoint (`enabled`, `host`, `port`) |
 | `log.max` | pendant log lines kept for the widget |
 
+## CNCjs widget
+
+The package ships a small [custom widget](https://github.com/cncjs/cncjs-widget-boilerplate) for CNCjs (source in
+`widget/`, built output in `widget/dist`). Collapsed, it is one row: a handwheel icon coloured by the link state and a
+short status line. Expanded (fullscreen, or the button in the widget) it adds machine position, handwheel, CNCjs and
+jog statistics and a live tail of the handwheel log.
+
+| Icon colour | Meaning |
+|---|---|
+| green | handwheel connected, CNCjs socket up and machine port open |
+| amber | handwheel connected, but CNCjs is unreachable or the machine port is closed |
+| red | handwheel not connected |
+| grey | the widget cannot reach the bridge at all |
+
+The widget runs in your browser, not on the Pi, so it cannot use the bridge's `127.0.0.1:8001` directly. Two pieces
+are needed, both on the machine that runs CNCjs.
+
+**1. Serve the widget from CNCjs** with its `--mount` option. `cncjs-handwheel --widget-path` prints the directory:
+
+    cncjs --mount /handwheel:"$(cncjs-handwheel --widget-path)"
+
+(Add it to the arguments of your CNCjs service. The path changes when npm updates the package, so keep the
+`$(...)` form or restart CNCjs after an update.)
+
+**2. Forward the API through your reverse proxy**, under the same host as CNCjs so there is no CORS or mixed
+content. With Caddy:
+
+    handle_path /handwheel-api/* {
+        reverse_proxy 127.0.0.1:8001
+    }
+
+The bridge stays on loopback. Anything that reaches that route can read `/status` and `/log` (no secrets, but
+pendant log lines and the machine state), so put it behind the same access control as CNCjs.
+
+Then in CNCjs choose *Manage Widgets*, add a *Custom* widget and set its URL to `/handwheel/`.
+
+URL parameters (append them to the widget URL, e.g. `/handwheel/?theme=dark`):
+
+| Parameter | Default | |
+|---|---|---|
+| `api` | `/handwheel-api` | URL path of the proxied bridge |
+| `theme` | auto | `light` or `dark`; by default taken from the CNCjs page, else from the OS |
+| `mode` | | `full` starts expanded |
+
+**Fullscreen.** Stock CNCjs does not tell a custom widget that it is shown fullscreen, so until it does the widget
+has its own expand button. The repository's `tools/cncjs-custom-widget-fullscreen.diff` (11 lines in the CNCjs
+`Custom` widget) posts the state to the widget; with it the widget expands and collapses with CNCjs's own
+fullscreen button and hides its own.
+
+**Developing the widget.** `npm run dev:widget` starts a Vite dev server that forwards `/handwheel-api` to a bridge
+on `127.0.0.1:8001` (override with `HANDWHEEL_BRIDGE=http://host:port`). `npm run build:widget` builds `widget/dist`;
+`npm publish` does that first (`prepublishOnly`), so the published package contains the built widget and the Pi
+needs no build tools.
+
 ## Pendant protocol
 
 Newline-terminated text. Everything except log lines must be printable ASCII.
