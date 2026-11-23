@@ -117,17 +117,21 @@ export function useHostHeight(active) {
   return height;
 }
 
+/** `?theme=light|dark`, or null: an explicit choice that also turns off following the CNCjs theme. */
+export const forcedTheme = ['light', 'dark'].includes(params.get('theme')) ? params.get('theme') : null;
+
 /**
- * Picks light or dark: `?theme=` wins, then a "dark" class or data attribute on the CNCjs page's <html>
- * (readable because the widget is served from the same origin), then the OS preference.
+ * Picks light or dark: `?theme=` wins, then the CNCjs page's data-color-mode (readable because the widget is
+ * served from the same origin), then a "dark" class on its <html>, then the OS preference.
  *
  * @returns {'light'|'dark'}
  */
 export function detectTheme() {
-  const forced = params.get('theme');
-  if (forced === 'dark' || forced === 'light') return forced;
+  if (forcedTheme) return forcedTheme;
   try {
     const el = window.parent.document.documentElement;
+    const mode = el.getAttribute('data-color-mode'); // CNCjs sets this on <html>
+    if (mode === 'light' || mode === 'dark') return mode;
     const marks = [el.className, ...Array.from(el.attributes).map((a) => a.name + '=' + a.value)].join(' ');
     if (/dark/i.test(marks)) return 'dark';
     if (/light/i.test(marks)) return 'light';

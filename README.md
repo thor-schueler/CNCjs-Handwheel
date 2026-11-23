@@ -180,10 +180,16 @@ URL parameters (append them to the widget URL, e.g. `/handwheel/?theme=dark`):
 | Parameter | Default | |
 |---|---|---|
 | `api` | `/handwheel-api` | URL path of the proxied bridge |
-| `theme` | auto | `light` or `dark`; by default taken from the CNCjs page, else from the OS |
+| `theme` | auto | `light` or `dark`; forces the widget's own light or dark colours and stops it from following CNCjs. By default (see below) it follows CNCjs |
 | `mode` | | `full` starts expanded |
 | `debug` | | `1` adds an expand/collapse button (normally the details show only while CNCjs shows the widget fullscreen) |
 | `poll` | `400` | how often the widget asks the bridge, in ms (at least 200) |
+
+**Colours.** Served from the same origin as CNCjs, the widget takes its light/dark mode (`data-color-mode` on
+`<html>`) and its colours from CNCjs's own theme tokens (`--color-surface`, `--color-widget-header-bg`,
+`--color-status-danger-text`, ... see `widget/src/hostTheme.js` for the mapping) and follows a mode change live. CNCjs has no green
+token, so the OK green is the widget's own. Where it cannot read the page (cross-origin, such as the Vite dev server) or
+CNCjs lacks a token, the widget's own light and dark stylesheet applies.
 
 **Fullscreen.** When the widget is served from the same origin as CNCjs (the setups above), it watches CNCjs's
 widget container and expands and collapses with CNCjs's own fullscreen button; its own expand button then hides.
