@@ -10,6 +10,9 @@ export const API_BASE = (params.get('api') || '/handwheel-api').replace(/\/+$/, 
 
 const FETCH_TIMEOUT_MS = 3000;
 
+/** Poll interval in ms: `?poll=` (at least 200), default 400. The bridge answers from memory, so this is cheap. */
+const POLL_MS = Math.max(200, Number(params.get('poll')) || 400);
+
 /**
  * GETs JSON from the bridge, failing after FETCH_TIMEOUT_MS.
  *
@@ -42,7 +45,7 @@ async function getJson(path, signal) {
  * @param {number} [opts.logMax] - log entries kept in memory
  * @returns {{status: ?object, error: ?string, lastOkAt: ?number, log: object[]}}
  */
-export function useBridge({ withLog, intervalMs = 1000, logMax = 300 }) {
+export function useBridge({ withLog, intervalMs = POLL_MS, logMax = 300 }) {
   const [status, setStatus] = useState(null);
   const [error, setError] = useState(null);
   const [lastOkAt, setLastOkAt] = useState(null);

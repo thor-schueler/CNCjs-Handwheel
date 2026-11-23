@@ -182,6 +182,8 @@ URL parameters (append them to the widget URL, e.g. `/handwheel/?theme=dark`):
 | `api` | `/handwheel-api` | URL path of the proxied bridge |
 | `theme` | auto | `light` or `dark`; by default taken from the CNCjs page, else from the OS |
 | `mode` | | `full` starts expanded |
+| `debug` | | `1` adds an expand/collapse button (normally the details show only while CNCjs shows the widget fullscreen) |
+| `poll` | `400` | how often the widget asks the bridge, in ms (at least 200) |
 
 **Fullscreen.** When the widget is served from the same origin as CNCjs (the setups above), it watches CNCjs's
 widget container and expands and collapses with CNCjs's own fullscreen button; its own expand button then hides.

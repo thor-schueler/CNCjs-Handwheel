@@ -176,7 +176,7 @@ const health = {
         reconnects: 0, errors: 0, lastError: null, logLines: 0, garbageLines: 0, link: null, info: null },
     cncjs: { socketConnected: false, portOpen: false, port: cfg.cncjs.port, controllerType: cfg.cncjs.controllerType,
         lastError: null, droppedCommands: 0 },
-    jog: { sent: 0, merged: 0, discarded: 0, stalls: 0, cancels: 0, inFlight: 0, held: false },
+    jog: { sent: 0, merged: 0, discarded: 0, stalls: 0, cancels: 0, inFlight: 0, held: false, lastAt: null },
     lastCommand: null
 };
 
@@ -560,6 +560,7 @@ function sendGcodeLine(line) {
  * @returns {boolean} true
  */
 function queueJog(j) {
+    health.jog.lastAt = Date.now(); // the wheel is being turned (the widget shows "Jog" for a moment)
     const p = jog.pending;
     if (p && p.prefix === j.prefix && p.axis === j.axis && p.feed === j.feed) {
         p.dist += j.dist;
@@ -923,7 +924,7 @@ function healthReport() {
             lastTxAgeMs: age(health.pendant.lastTx),
             info: health.pendant.info && Object.assign({}, health.pendant.info, { ageMs: age(health.pendant.info.at) }) }),
         cncjs: health.cncjs,
-        jog: health.jog,
+        jog: Object.assign({}, health.jog, { lastAgeMs: age(health.jog.lastAt) }),
         lastCommand: health.lastCommand,
         status: snapshot()
     };

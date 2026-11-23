@@ -38,6 +38,9 @@ function Bar({ values, zeroGood }) {
   ));
 }
 
+/** How long "Jog" stays up after the last jog the wheel asked for. */
+const JOG_HOLD_MS = 700;
+
 /** CSS class of the Grbl machine state in the status line. */
 const stateClass = (s) => (/^(Run|Jog|Home)/i.test(s) ? 'busy' : /^(Hold|Door)/i.test(s) ? 'warn' : /^Alarm/i.test(s) ? 'bad' : '');
 
@@ -136,7 +139,14 @@ export default function App() {
   // Ages in the report are relative to the moment it was built; add the time since it arrived.
   const age = (ms) => (ms === null || ms === undefined ? null : ms + (Date.now() - lastOkAt));
 
-  const machineState = ((status && status.status && status.status.state) || '–').replace(/:\d+$/, ''); // Grbl's Hold:0 / Door:1 sub-state
+  let machineState = ((status && status.status && status.status.state) || '–').replace(/:\d+$/, ''); // Grbl's Hold:0 / Door:1 sub-state
+  // Grbl is only sampled a few times a second and each 0.1 mm jog is over in milliseconds, so a wheel being
+  // turned shows up as "Idle" most of the time. The bridge knows better: while jogs are in flight or were
+  // requested a moment ago, say so.
+  if (machineState === 'Idle' && status && status.jog && (status.jog.inFlight > 0
+    || (status.jog.lastAgeMs !== null && status.jog.lastAgeMs !== undefined && age(status.jog.lastAgeMs) < JOG_HOLD_MS))) {
+    machineState = 'Jog';
+  }
   // "Drop" adds the pendant lines the bridge could not use and the commands it could not hand to CNCjs.
   const counts = status && status.pendant
     ? [status.pendant.reconnects || 0, status.pendant.errors || 0,
