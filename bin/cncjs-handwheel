@@ -83,6 +83,7 @@ program
     .name('cncjs-handwheel')
     .version(pkg.version)
     .option('-l, --list', 'list available serial ports then exit')
+    .option('--widget-path', 'print the directory of the built CNCjs widget (for cncjs --mount) then exit')
     .option('-c, --config <file>', 'config file (default: ' + DEFAULT_CONFIG_FILE + ' if present)')
     .option('-s, --secret <secret>', 'CNCjs secret (default: $CNCJS_SECRET or ~/.cncrc)')
     .option('-p, --port <port>', 'CNC controller port as known to CNCjs, e.g. /dev/ttyUSB0')
@@ -98,6 +99,16 @@ program
     .option('--no-jog-translate', 'send pendant jogs as plain gcode instead of $J= (same as jog.translate: false)');
 program.parse(process.argv);
 const cli = program.opts();
+
+if (cli.widgetPath) {
+    const dir = path.join(__dirname, '..', 'widget', 'dist');
+    if (!fs.existsSync(path.join(dir, 'index.html'))) {
+        console.error('The widget is not built: ' + dir + ' has no index.html. Run `npm run build:widget` in the package directory.');
+        process.exit(1);
+    }
+    console.log(dir);
+    process.exit(0);
+}
 
 /**
  * Tells whether a value is a plain object (not null, not an array).
@@ -162,10 +173,10 @@ const store = { controller: { state: {}, settings: {} }, sender: { status: {} } 
 const health = {
     startedAt: Date.now(),
     pendant: { path: cfg.device.path, connected: false, lastRx: null, lastTx: null, rxLines: 0, txLines: 0,
-        reconnects: 0, errors: 0, lastError: null, logLines: 0, garbageLines: 0 },
+        reconnects: 0, errors: 0, lastError: null, logLines: 0, garbageLines: 0, link: null, info: null },
     cncjs: { socketConnected: false, portOpen: false, port: cfg.cncjs.port, controllerType: cfg.cncjs.controllerType,
         lastError: null, droppedCommands: 0 },
-    jog: { sent: 0, merged: 0, discarded: 0, stalls: 0, cancels: 0, inFlight: 0, held: false },
+    jog: { sent: 0, merged: 0, discarded: 0, stalls: 0, cancels: 0, inFlight: 0, held: false, lastAt: null },
     lastCommand: null
 };
 
@@ -388,6 +399,46 @@ function dropLine(raw) {
 }
 
 /**
+ * Parses the pendant's own status report `[HW:bat=74,chg=0,eta=13200,st=ok]` and stores it for /status.
+ * Keys: bat 0-100 (%), chg 1 while charging, eta seconds to full (charging) or empty, st ok|warn|err.
+ * All are optional and unknown keys are ignored, so the firmware can grow. Never sent to the controller.
+ *
+ * @param {string} line - trimmed line from the pendant
+ * @returns {boolean} true if the line was a pendant status report (valid or not)
+ */
+function parsePendantReport(line) {
+    const m = /^\[HW:([^\]]*)\]$/.exec(line);
+    if (!m) return false;
+    const info = {}; // each report replaces the last one: a key that is left out is unknown, not unchanged
+    m[1].split(',').forEach((pair) => {
+        const [k, v] = pair.split('=').map((x) => x.trim());
+        const num = /^\d+$/.test(v) ? Number(v) : null;
+        if (k === 'bat' && num !== null && num <= 100) info.bat = num;
+        else if (k === 'chg' && (v === '0' || v === '1')) info.chg = v === '1';
+        else if (k === 'eta' && num !== null) info.eta = num;
+        else if (k === 'st' && /^(ok|warn|err)$/.test(v)) info.st = v;
+    });
+    info.at = Date.now();
+    health.pendant.info = info;
+    return true;
+}
+
+/**
+ * Works out whether the pendant port is USB or Bluetooth (rfcomm), looking through the udev symlink
+ * (/dev/pendant) at the real device node.
+ *
+ * @param {string} devPath - configured pendant port
+ * @returns {?string} 'bluetooth', 'usb' or null if it cannot be told
+ */
+function detectLink(devPath) {
+    let real = devPath;
+    try { real = fs.realpathSync(devPath); } catch (err) { /* keep the configured path */ }
+    if (/rfcomm/i.test(real)) return 'bluetooth';
+    if (/tty(USB|ACM)/i.test(real) || /usb/i.test(real)) return 'usb';
+    return null;
+}
+
+/**
  * Handles one complete line from the pendant: realtime commands (! ~ ^X ?), console log entries
  * (; ...), PING / STATUS?, and otherwise gcode (jogs are translated to $J= for Grbl).
  *
@@ -422,6 +473,7 @@ function onPendantLine(raw) {
         dropLine(raw);
         return;
     }
+    if (parsePendantReport(line)) return;
     const upper = line.toUpperCase();
     if (upper === 'PING') return sendToPendant('PONG');
     if (upper === 'STATUS?') return sendStatus(true);
@@ -508,6 +560,7 @@ function sendGcodeLine(line) {
  * @returns {boolean} true
  */
 function queueJog(j) {
+    health.jog.lastAt = Date.now(); // the wheel is being turned (the widget shows "Jog" for a moment)
     const p = jog.pending;
     if (p && p.prefix === j.prefix && p.axis === j.axis && p.feed === j.feed) {
         p.dist += j.dist;
@@ -826,6 +879,7 @@ function openPendant() {
     port.on('error', noteError);
     port.on('close', () => {
         health.pendant.connected = false;
+        health.pendant.info = null; // a stale battery level is worse than none
         if (!shuttingDown) console.log('Pendant port closed');
         scheduleReconnect();
     });
@@ -845,6 +899,7 @@ function openPendant() {
             port.set(lines, (setErr) => { if (setErr) noteError(setErr); });
         }
         health.pendant.connected = true;
+        health.pendant.link = detectLink(cfg.device.path);
         health.pendant.lastError = null;
         console.log('Pendant connected on ' + cfg.device.path);
         sendStatus(true);
@@ -866,9 +921,10 @@ function healthReport() {
         version: pkg.version,
         uptimeMs: now - health.startedAt,
         pendant: Object.assign({}, health.pendant, { sendEnabled: !!cfg.device.send, lastRxAgeMs: age(health.pendant.lastRx),
-            lastTxAgeMs: age(health.pendant.lastTx) }),
+            lastTxAgeMs: age(health.pendant.lastTx),
+            info: health.pendant.info && Object.assign({}, health.pendant.info, { ageMs: age(health.pendant.info.at) }) }),
         cncjs: health.cncjs,
-        jog: health.jog,
+        jog: Object.assign({}, health.jog, { lastAgeMs: age(health.jog.lastAt) }),
         lastCommand: health.lastCommand,
         status: snapshot()
     };

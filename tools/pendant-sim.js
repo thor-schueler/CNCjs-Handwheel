@@ -19,6 +19,7 @@
 //   h                  home ($H)         space  feed hold (!)     r  cycle start (~)
 //   X                  soft reset (^X)   ?      status request    p  PING
 //   c                  jog cancel (0x85) l      log line ("; ...")
+//   w                  send the pendant's own state report [HW:...], stepping through sample states
 //   b                  burst: many jogs in the last direction, to reproduce a wheel being spun fast
 //   q or Ctrl-C        quit
 // Holding a jog key auto-repeats, which behaves like turning the wheel.
@@ -29,10 +30,20 @@
 //     x+ x- y+ y- z+ z-   one jog with the current step      x+*200@100  200 jogs at 100 per second
 //     step:0.1  feed:2000  home  hold  resume  reset  status  ping  cancel
 //     log:text            send "; text"                      raw:LINE  send any line as it is
+//     hw:bat=74+chg=0+eta=13200+st=ok   send the pendant's own status report [HW:...]
 //     wait:500            wait 500 ms
 
 const readline = require('readline');
 const { SerialPort } = require('serialport');
+
+// sample pendant reports for the 'w' key: charging, on battery, low battery warning, error, no battery data
+const HW_SAMPLES = [
+    '[HW:bat=62,chg=1,eta=3900,st=ok]',
+    '[HW:bat=74,chg=0,eta=13200,st=ok]',
+    '[HW:bat=12,chg=0,eta=1500,st=warn]',
+    '[HW:bat=58,chg=0,eta=10200,st=err]',
+    '[HW:st=ok]'
+];
 
 const STEPS = { 1: '1', 2: '0.1', 3: '0.01', 4: '0.001' };
 
@@ -74,6 +85,7 @@ if (!opts.script && !interactive) {
 }
 
 const sim = {
+    hw: 0,                         // next sample pendant report for the w key
     step: opts.step,
     feed: opts.feed,
     last: { axis: 'X', dir: 1 },   // last jog direction, used by the burst
@@ -259,6 +271,7 @@ async function runScript(text) {
         else if ((m = /^wait:(\d+)$/.exec(tok))) await sleep(Number(m[1]));
         else if ((m = /^log:(.*)$/.exec(tok))) sendLine('; ' + m[1]);
         else if ((m = /^raw:(.*)$/.exec(tok))) sendLine(m[1]);
+        else if ((m = /^hw:(.*)$/.exec(tok))) sendLine('[HW:' + m[1].replace(/\+/g, ',') + ']');
         else if (simple[tok]) sendLine(simple[tok]);
         else { console.error('Unknown script token: ' + tok); quit(1); return; }
     }
@@ -292,6 +305,10 @@ function startKeyboard() {
         else if (str === '?') sendLine('?');
         else if (str === 'p') { sendLine('PING'); log('> PING'); }
         else if (str === 'c') { sendLine('\x85'); log('> 0x85 (jog cancel)'); }
+        else if (str === 'w') {
+            const r = HW_SAMPLES[sim.hw++ % HW_SAMPLES.length];
+            sendLine(r); log('> ' + r);
+        }
         else if (str === 'l') { sendLine('; hello from the simulator'); log('> ; hello from the simulator'); }
         else if (str === 'b') {
             log('> burst: ' + opts.burstCount + ' x ' + sim.last.axis + (sim.last.dir > 0 ? '+' : '-') + sim.step + ' at ' + opts.burstHz + '/s');
