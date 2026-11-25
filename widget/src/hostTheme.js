@@ -1,3 +1,5 @@
+import { getHostProps } from './host';
+
 /**
  * Our colour variable -> the CNCjs token (src/app/styles/theme.styl) it takes its value from. CNCjs has no
  * "success" green, so the OK green stays our own (the stylesheet picks one for light or dark).
@@ -19,8 +21,8 @@ const TOKENS = {
 };
 
 /**
- * Takes the colours from the CNCjs page the widget is embedded in: its light/dark mode (the data-color-mode
- * attribute on <html>) and the values of its theme tokens. Follows the page when the mode changes. Only possible
+ * Takes the colour values of CNCjs's theme tokens from the CNCjs page the widget is embedded in and follows them when
+ * the mode changes (light or dark itself comes from the colorMode message, see host.js). Only possible
  * when the widget is served from the same origin as CNCjs; otherwise (or if CNCjs has no such tokens) the
  * widget's own stylesheet applies.
  *
@@ -32,8 +34,9 @@ export default function adoptHostTheme() {
     const root = window.parent.document.documentElement;
     const mine = document.documentElement;
     const apply = () => {
+      // Light or dark normally comes from CNCjs's colorMode message; reading it off the page is the fallback for a CNCjs without it.
       const mode = root.getAttribute('data-color-mode');
-      if (mode === 'light' || mode === 'dark') mine.dataset.theme = mode;
+      if (!getHostProps().colorMode && (mode === 'light' || mode === 'dark')) mine.dataset.theme = mode;
       const computed = window.parent.getComputedStyle(root);
       Object.keys(TOKENS).forEach((name) => {
         const value = computed.getPropertyValue(TOKENS[name]).trim();

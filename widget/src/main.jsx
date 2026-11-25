@@ -1,7 +1,7 @@
 import { Component, StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 import App from './App';
-import { announce, reportSize, detectTheme, forcedTheme } from './host';
+import { connectToHost, followHostColorMode, forcedTheme, reportSize } from './host';
 import adoptHostTheme from './hostTheme';
 import './styles.css';
 
@@ -21,16 +21,18 @@ class ErrorBoundary extends Component {
   }
 }
 
-document.documentElement.dataset.theme = detectTheme();
-// Same origin as CNCjs: use CNCjs's own colours (an explicit ?theme= keeps the widget's stylesheet).
+// Light or dark as CNCjs reports it (any origin); the colours themselves come from CNCjs when it is the same origin.
+followHostColorMode();
 if (!forcedTheme) adoptHostTheme();
 // Inside CNCjs the iframe is sized to its content, so it never needs a scroll bar of its own.
 if (window.parent !== window) document.documentElement.classList.add('embedded');
 reportSize();
-announce();
 
 createRoot(document.getElementById('root')).render(
   <StrictMode>
     <ErrorBoundary><App /></ErrorBoundary>
   </StrictMode>
 );
+// The listener is installed before the question is asked; what the answer holds is kept in a store, so a reply that
+// beats the first render is still read when the components mount.
+connectToHost();

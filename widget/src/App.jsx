@@ -192,7 +192,7 @@ export default function App() {
               <>
                 <span className={'mstate ' + stateClass(machineState)}>{machineState}</span>
                 {counts && <span><em>Reconn|Err|Drop</em> <Bar items={counts.map((v) => [v, 'bad'])} /></span>}
-                {status.jog && <span><em>In flight|Held</em> <Bar items={[[status.jog.inFlight || 0, 'good'], [status.jog.held ? 1 : 0, 'good']]} /></span>}
+                {status.jog && <span className="grp-jog"><em>In flight|Held</em> <Bar items={[[status.jog.inFlight || 0, 'good'], [status.jog.held ? 1 : 0, 'good']]} /></span>}
               </>
             ) : (error && lastOkAt ? 'last seen ' + ago(Date.now() - lastOkAt) : '')}
           </small>

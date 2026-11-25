@@ -220,19 +220,25 @@ URL parameters (append them to the widget URL, e.g. `/handwheel/?theme=dark`):
 | `debug` | | `1` adds an expand/collapse button (normally the details show only while CNCjs shows the widget fullscreen) |
 | `poll` | `400` | how often the widget asks the bridge, in ms (at least 200) |
 
-**Colours.** Served from the same origin as CNCjs, the widget takes its light/dark mode (`data-color-mode` on
-`<html>`) and its colours from CNCjs's own theme tokens (`--color-surface`, `--color-widget-header-bg`,
+**Messages from CNCjs.** The CNCjs Custom widget tells the page what state it is in: after the page's `connect`
+handshake, and whenever something changes, it sends a `change` message whose `payload.props` holds `fullscreen`,
+`colorMode` (`light` or `dark`) and `disabled`. The widget follows `fullscreen` (expands and collapses with CNCjs's
+own fullscreen button; its own expand button then hides) and `colorMode`, in every setup, same origin or not. Needs a
+CNCjs with that support (cncjs/cncjs, Custom widget `props`); against an older CNCjs the messages carry no `props`
+and the widget uses the fallbacks below.
+
+**Colours.** Light or dark follows CNCjs's `colorMode`. Served from the same origin as CNCjs the widget also takes
+its colours from CNCjs's own theme tokens (`--color-surface`, `--color-widget-header-bg`,
 `--color-status-danger-text`, ... see `widget/src/hostTheme.js` for the mapping) and follows a mode change live. CNCjs has no green
 token, so the OK green is the widget's own. Where it cannot read the page (cross-origin, such as the Vite dev server) or
-CNCjs lacks a token, the widget's own light and dark stylesheet applies.
+CNCjs lacks a token, the widget's own light and dark stylesheet applies. Without a `colorMode` message it reads
+`data-color-mode` off the CNCjs page (same origin only) and finally the OS preference; `?theme=` overrides all of it.
 
-**Fullscreen.** When the widget is served from the same origin as CNCjs (the setups above), it watches CNCjs's
-widget container and expands and collapses with CNCjs's own fullscreen button; its own expand button then hides.
-Fullscreen, the log pane takes the height that is left, so the CNCjs widget only scrolls when the screen is too short for the cards. This relies on the CSS class CNCjs puts on a fullscreen widget, so a CNCjs refactor can break it; the widget then
-just keeps its own expand button. Where the widget is cross-origin (the Vite dev server) it cannot look at the
-page, so use the expand button or `?mode=full`. A sturdier alternative is `tools/cncjs-custom-widget-fullscreen.diff`
-(11 lines in the CNCjs `Custom` widget): the patched CNCjs posts the fullscreen state to the widget, which listens
-for it in every setup. It is optional.
+**Fullscreen.** With the `fullscreen` prop above, the log pane takes the height that is left when it can read the
+CNCjs page (same origin), so the CNCjs widget only scrolls when the screen is too short for the cards; elsewhere the
+log keeps its default height. Against a CNCjs without the prop, a same-origin widget watches the CSS class CNCjs puts
+on a fullscreen widget (a CNCjs refactor can break that; the widget then just keeps its own expand button), and a
+cross-origin one (the Vite dev server) needs the expand button or `?mode=full`.
 
 **Developing the widget.** `npm run dev:widget` starts a Vite dev server that forwards `/handwheel-api` to a bridge
 on `127.0.0.1:8001` (override with `HANDWHEEL_BRIDGE=http://host:port`). `npm run build:widget` builds `widget/dist`;
