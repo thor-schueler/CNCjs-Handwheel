@@ -6,11 +6,48 @@ const token = params.get('token');
 /** `?debug=1` shows the widget's own expand/collapse button. */
 export const DEBUG = params.get('debug') === '1';
 
+/** What CNCjs last told this page about its widget (the `props` of a `change` message); null = not told. */
+const hostProps = { disabled: null, fullscreen: null, colorMode: null };
+const subscribers = new Set();
+let connected = false;
+
+/** @returns {{disabled: ?boolean, fullscreen: ?boolean, colorMode: ?('light'|'dark')}} a copy of what CNCjs reported */
+export const getHostProps = () => ({ ...hostProps });
+
 /**
- * Announces the widget to CNCjs. CNCjs answers with its 'change' message and, when patched
- * (see the README), with the current full screen state.
+ * Calls `fn` with the full props object whenever CNCjs reports a change.
+ *
+ * @param {function(object): void} fn
+ * @returns {function(): void} unsubscribe
  */
-export function announce() {
+export function subscribeHostProps(fn) {
+  subscribers.add(fn);
+  return () => subscribers.delete(fn);
+}
+
+/** Takes the `props` of a CNCjs `change` message; unknown or mistyped fields are ignored. */
+function onMessage(event) {
+  const { token: t, action } = { ...event.data };
+  if (event.source !== window.parent || (token && t !== token)) return; // not from CNCjs for this widget
+  // A `change` also announces a new serial port; only `payload.props` matters here, and an older CNCjs sends none.
+  const props = action && action.type === 'change' && action.payload && action.payload.props;
+  if (!props || typeof props !== 'object') return;
+  if (typeof props.disabled === 'boolean') hostProps.disabled = props.disabled;
+  if (typeof props.fullscreen === 'boolean') hostProps.fullscreen = props.fullscreen;
+  if (props.colorMode === 'light' || props.colorMode === 'dark') hostProps.colorMode = props.colorMode;
+  subscribers.forEach((fn) => fn(getHostProps()));
+}
+
+/**
+ * Handshake with CNCjs: starts listening, then asks once. CNCjs answers with a `change` message holding the
+ * current props (full screen, colour mode, disabled). The listener must exist first: the answer can arrive
+ * before the page has finished starting, and the earlier `change` messages are lost when the iframe is
+ * created by the very update they describe. Call once; further calls do nothing.
+ */
+export function connectToHost() {
+  if (connected || window.parent === window) return;
+  connected = true;
+  window.addEventListener('message', onMessage);
   window.parent.postMessage({ token, action: { type: 'connect' } }, '*');
 }
 
@@ -61,29 +98,27 @@ function watchParentFullscreen(onChange) {
 }
 
 /**
- * True while the CNCjs widget is shown full screen. Detected, in order, from the CNCjs page itself (same
- * origin only) and from a `{ action: { type: 'fullscreen', payload: { fullscreen } } }` message that a patched
- * CNCjs posts (see the README). With neither it stays false. `?mode=full` forces it on, and `?debug=1` adds an expand button.
+ * True while the CNCjs widget is shown full screen. CNCjs says so in the `fullscreen` prop of its `change`
+ * messages. Against a CNCjs that does not (older than the Custom widget `props`) it falls back to watching the
+ * CNCjs page (same origin only) and otherwise stays false. `?mode=full` forces it on, `?debug=1` adds an expand button.
  *
  * @returns {boolean}
  */
 export function useHostFullscreen() {
-  const [fullscreen, setFullscreen] = useState(params.get('mode') === 'full');
+  const forced = params.get('mode') === 'full';
+  const [fullscreen, setFullscreen] = useState(forced || !!getHostProps().fullscreen);
   useEffect(() => {
-    const onMessage = (event) => {
-      const { token: t, action } = { ...event.data };
-      if (token && t !== token) return; // not from CNCjs for this widget
-      if (action && action.type === 'fullscreen') {
-        setFullscreen(!!(action.payload && action.payload.fullscreen));
-      }
-    };
-    window.addEventListener('message', onMessage);
-    const stopWatching = params.get('mode') === 'full' ? null : watchParentFullscreen(setFullscreen);
+    if (forced) return undefined;
+    const sync = (p) => { if (p.fullscreen !== null) setFullscreen(p.fullscreen); };
+    sync(getHostProps());
+    const unsubscribe = subscribeHostProps(sync);
+    // The fallback only speaks while CNCjs has not sent the prop.
+    const stopWatching = watchParentFullscreen((v) => { if (getHostProps().fullscreen === null) setFullscreen(v); });
     return () => {
-      window.removeEventListener('message', onMessage);
+      unsubscribe();
       if (stopWatching) stopWatching();
     };
-  }, []);
+  }, [forced]);
   return fullscreen;
 }
 
@@ -121,22 +156,26 @@ export function useHostHeight(active) {
 export const forcedTheme = ['light', 'dark'].includes(params.get('theme')) ? params.get('theme') : null;
 
 /**
- * Picks light or dark: `?theme=` wins, then the CNCjs page's data-color-mode (readable because the widget is
- * served from the same origin), then a "dark" class on its <html>, then the OS preference.
+ * The colour mode to start with, before CNCjs has said which it is: `?theme=` or else the OS preference.
  *
  * @returns {'light'|'dark'}
  */
-export function detectTheme() {
+export function initialTheme() {
   if (forcedTheme) return forcedTheme;
-  try {
-    const el = window.parent.document.documentElement;
-    const mode = el.getAttribute('data-color-mode'); // CNCjs sets this on <html>
-    if (mode === 'light' || mode === 'dark') return mode;
-    const marks = [el.className, ...Array.from(el.attributes).map((a) => a.name + '=' + a.value)].join(' ');
-    if (/dark/i.test(marks)) return 'dark';
-    if (/light/i.test(marks)) return 'light';
-  } catch (err) {
-    // cross-origin parent: fall through
-  }
   return window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+}
+
+/**
+ * Keeps `data-theme` on <html> at the colour mode CNCjs reports (its `colorMode` prop, which works across
+ * origins). `?theme=` stays in charge when given.
+ *
+ * @returns {function(): void} stops following
+ */
+export function followHostColorMode() {
+  const root = document.documentElement;
+  root.dataset.theme = initialTheme();
+  if (forcedTheme) return () => {};
+  const apply = (p) => { if (p.colorMode) root.dataset.theme = p.colorMode; };
+  apply(getHostProps());
+  return subscribeHostProps(apply);
 }

@@ -42,7 +42,7 @@ body {
 }
 code, .mono { font-family: "Segoe UI Mono", "SFMono-Medium", "SF Mono", Menlo, Consolas, Courier, monospace; }
 
-.widget { padding: 8px 10px; }
+.widget { padding: 8px 8px; }
 .widget.level-ok { --level: var(--ok); }
 .widget.level-warn { --level: var(--warn); }
 .widget.level-down { --level: var(--down); }
@@ -85,12 +85,17 @@ code, .mono { font-family: "Segoe UI Mono", "SFMono-Medium", "SF Mono", Menlo, C
 
 /* status line */
 .title small { white-space: normal; overflow: visible; }
-.counts { display: flex; flex-wrap: wrap; gap: 2px 16px; margin-top: 2px; }
-.counts em { font-style: normal; color: var(--muted); margin-right: 2px; }
+.counts { display: flex; flex-wrap: nowrap; gap: 2px 10px; margin-top: 2px; }
+.counts em { font-style: normal; color: var(--muted); margin-right: 1px; }
 .counts b { font-weight: 600; font-variant-numeric: tabular-nums; }
-.counts i { font-style: normal; color: var(--muted); margin: 0 2px; }
+.counts i { font-style: normal; color: var(--muted); margin: 0 1px; }
 .counts .good { color: var(--ok); }
 .counts .bad { color: var(--down); }
+.counts > span { white-space: nowrap; }
+/* What changes while the wheel is turned (the state word, the in-flight count) keeps the room of its widest likely value,
+   so "Idle" turning into "Jog" or a second digit appearing never makes the line reflow. */
+.counts > .mstate { min-width: 2.7em; }
+.counts > .grp-jog { min-width: 8.0em; }
 .mstate { font-weight: 600; }
 .mstate.busy { color: var(--accent); }
 .mstate.warn { color: var(--warn); }
