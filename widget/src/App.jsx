@@ -168,6 +168,9 @@ export default function App() {
       (status.pendant.garbageLines || 0) + ((status.cncjs && status.cncjs.droppedCommands) || 0)]
     : null;
 
+  // The counters only mean something while the controller is there: CNCjs reachable and the machine port open.
+  const live = !!(status && status.cncjs && status.cncjs.socketConnected && status.cncjs.portOpen);
+
   // Full screen: the iframe is exactly as tall as its content, so a log of fixed height makes the CNCjs widget
   // scroll whenever the screen is shorter than the content, and leaves empty space when it is taller. Make the
   // log take up whatever height is left instead (same origin only; elsewhere it keeps its default height).
@@ -191,8 +194,8 @@ export default function App() {
             {status && !error ? (
               <>
                 <span className={'mstate ' + stateClass(machineState)}>{machineState}</span>
-                {counts && <span><em>Reconn|Err|Drop</em> <Bar items={counts.map((v) => [v, 'bad'])} /></span>}
-                {status.jog && <span className="grp-jog"><em>In flight|Held</em> <Bar items={[[status.jog.inFlight || 0, 'good'], [status.jog.held ? 1 : 0, 'good']]} /></span>}
+                {live && counts && <span><em>Reconn|Err|Drop</em> <Bar items={counts.map((v) => [v, 'bad'])} /></span>}
+                {live && status.jog && <span className="grp-jog"><em>In flight|Held</em> <Bar items={[[status.jog.inFlight || 0, 'good'], [status.jog.held ? 1 : 0, 'good']]} /></span>}
               </>
             ) : (error && lastOkAt ? 'last seen ' + ago(Date.now() - lastOkAt) : '')}
           </small>

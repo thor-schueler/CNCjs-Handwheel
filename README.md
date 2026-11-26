@@ -126,6 +126,7 @@ Start from `cncjs-handwheel.config.example.json`.
 | `cncjs.reopenOnClose` | reopen the CNC port when it is closed behind the bridge's back, e.g. from the CNCjs UI (default `true`). Set `false` if you want the UI's Close to release the machine |
 | `device.path` | pendant serial port: `/dev/pendant` (USB, with the udev rule) or `/dev/rfcomm0` (Bluetooth) |
 | `device.baudRate`, `device.settleMs` | pendant baud rate; pendant input is ignored this long after opening |
+| `device.strictGcode` | `true` (default): only gcode-like lines from the pendant reach the controller, other text is shown in the widget log instead |
 | `device.send` | `false` (or `--no-pendant-send`): never write anything to the pendant, no status, `PONG` or `ERR`. Pendant to CNCjs keeps working. Useful when the firmware does not read from the serial port yet, or to rule the status stream out when debugging |
 | `device.hupcl`, `dtr`, `rts` | modem control line handling (the defaults are fine with the udev rule) |
 | `device.power` | `{line, poweredWhen, pollMs, debounceMs}`: detect that the handwheel is switched off while the USB cable is still plugged in, see "Detecting a switched-off handwheel". Off unless `line` is set |
@@ -253,8 +254,10 @@ Pendant to bridge:
 
 | Line | Effect |
 |---|---|
-| `G21G91X+10F2000` | jog (sent as `$J=...`); any other line is sent to the controller as gcode |
+| `G21G91X+10F2000` | jog (sent as `$J=...`); any other line that looks like gcode (words such as `G10 L20 P1 Z15.05`, a Grbl `$` command, a CNCjs `%` line) is sent to the controller as gcode. Other text is not sent: it is shown in the widget's log as `[not gcode, not sent] ...` and counted (`pendant.strayLines`, and in `garbageLines`, the widget's Drop). Turn that off with `device.strictGcode: false` |
 | `!` / `~` / `^X` (0x18) | feed hold / cycle start / reset, each as a line of its own (reset at most once per 2 s) |
+| `$X` | unlock; sent to CNCjs as its `unlock` command, because a gcode line is dropped by CNCjs while the machine is in Alarm |
+| `... ; comment` | as in gcode, everything after a `;` that is not at the start of the line is a comment: it is not sent, only the part before it is the command. So `0x18; Reset the machine` is a reset and `$X; Unlock` an unlock. (A line that starts with `;` is a log entry) |
 | `0x85` (the single byte, as a line of its own) or `JOGCANCEL` | cancel the jog in progress (Grbl only), see "Jog cancel" below |
 | `?` or `STATUS?` | immediate status line |
 | `PING` | answered with `PONG` |
@@ -297,9 +300,16 @@ the machine moves) tracks the move. If no line arrives for about 1 second, treat
 - **The widget's log pane stays empty.** The pane shows the pendant's *log lines* only: lines that start with a
   semicolon (`; text`). It also says how many lines the bridge has received and how many of them were log lines
   (`/status` has the same numbers as `pendant.rxLines` and `pendant.logLines`; `/log` has the entries). Lines
-  without the semicolon are not log lines: the bridge sends them to the controller as gcode, so a firmware that
-  prints debug text on the same serial port must prefix it with `;`. Output from before the port settled
+  without the semicolon are not log lines. Text that does not look like gcode (`device.strictGcode`, on by default)
+  is kept out of the controller and appears in the log as `[not gcode, not sent] ...`; with `strictGcode: false` the
+  bridge sends it as gcode and Grbl answers `error:..`. A firmware that prints debug text on the same serial port
+  should prefix **every** line with `;`, also the continuation lines of a multi-line message, and write each line
+  with one call so that jog output cannot land in the middle of it. Output from before the port settled
   (`device.settleMs`) is discarded.
+- **Log text shows up in the CNCjs console (`feeder> ...`, `error:9`).** Those were pendant lines without the leading
+  `;` that the bridge sent on as gcode. With `device.strictGcode` (default) that cannot happen any more; the lines
+  show up in the widget log marked `[not gcode, not sent]`, which is also how you can see what the firmware really sent.
+  A jog that is split by a log line is lost (one step); a leftover piece such as `F2000` can still be sent, it only sets the feed rate.
 - **`$$` and `$I` output at start.** Normal: CNCjs queries the controller when a client opens the CNC port.
 - **No WPos.** Grbl reports the work offset only every 10-30 status reports; the first WPos can take a few seconds.
 

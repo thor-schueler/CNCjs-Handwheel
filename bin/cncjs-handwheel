@@ -44,6 +44,11 @@ const DEFAULTS = {
         baudRate: 115200,
         reconnectMs: 3000,
         settleMs: 2000,            // ignore pendant input this long after opening the port
+        // strictGcode: only forward a pendant line to the machine when it looks like gcode (words such as G21 X+1.5 F2000,
+        //   Grbl "$" commands, "%" lines for CNCjs) and keep anything else out of it: it is shown in the widget's log
+        //   as "[not gcode, not sent] ..." and counted as dropped. A log line that lost its leading ";" (or a
+        //   fragment of one) would otherwise be sent to the controller and answered with error:..
+        strictGcode: true,
         send: true,                // false: never write anything to the pendant (status, PONG, ERR)
 
         // Modem-control lines. The CH340 + auto-reset transistors wire DTR/RTS to EN/IO0, so on Linux
@@ -194,7 +199,7 @@ const store = { controller: { state: {}, settings: {} }, sender: { status: {} } 
 const health = {
     startedAt: Date.now(),
     pendant: { path: cfg.device.path, connected: false, lastRx: null, lastTx: null, rxLines: 0, txLines: 0,
-        reconnects: 0, errors: 0, lastError: null, logLines: 0, garbageLines: 0, link: null, info: null,
+        reconnects: 0, errors: 0, lastError: null, logLines: 0, garbageLines: 0, strayLines: 0, link: null, info: null,
         powered: null, powerError: null }, // powered: null = unknown or not configured, true / false = switched on / off
     cncjs: { socketConnected: false, portOpen: false, port: cfg.cncjs.port, controllerType: cfg.cncjs.controllerType,
         lastError: null, droppedCommands: 0 },
@@ -327,8 +332,11 @@ function answerCommand() {
 //   ";..."  pendant console log entry (any text, ANSI colours stripped): kept in a ring buffer for the
 //           widget (GET /log), never sent to CNCjs; with -v it is printed as "pendant log: ..."
 //   lines dropped as non-text are reported with -v (escaped, at most one per second)
+//   everything after a ";" that is not at the start of the line is a comment and is not sent ("\x18; Reset")
+//   "$X" is sent as CNCjs's unlock command (a gcode line would be dropped in Alarm)
 //   PING -> PONG,  STATUS? -> immediate status line
-//   anything else -> gcode
+//   anything that looks like gcode (or a Grbl $ command) -> gcode; any other text is kept out of the machine
+//   (device.strictGcode, on by default) and shown in the widget log as "[not gcode, not sent] ..."
 // After the pendant port opens, input is ignored for device.settleMs so the boot output of an
 // ESP32 that was reset by the open is discarded.
 const logBuf = [];
@@ -390,6 +398,24 @@ function onPendantData(buf) {
             skipLine = true; // overlong line: drop it up to the next newline
         }
     }
+}
+
+// A gcode line: words (a letter and a number, a #parameter or a [expression]) with optional (comments) and spaces
+// between them, a Grbl "$" command (`$J=...`, `$H`, `$X`, `$$`, `$100=250`), or a "%" line for CNCjs (`%wait`).
+const GCODE_WORDS = /^(?:N\d+)?(?:[A-Z](?:[-+]?(?:\d+\.?\d*|\.\d+)|#\d+|\[[^\]]*\]))+$/;
+const GRBL_SYSTEM = /^\$[\w#$=.+\-]*$/;
+
+/**
+ * Says whether a text line from the pendant can be sent to the machine as gcode.
+ *
+ * @param {string} line - trimmed, printable line
+ * @returns {boolean}
+ */
+function looksLikeGcode(line) {
+    if (line[0] === '%') return true; // CNCjs's own statements (%wait, %x = ...)
+    const compact = line.replace(/\([^)]*\)/g, '').replace(/\s+/g, '').toUpperCase(); // comments and blanks do not count
+    if (!compact) return true; // only a comment: harmless
+    return GRBL_SYSTEM.test(compact) || GCODE_WORDS.test(compact);
 }
 
 // Only modal words (G20/G21/G90/G91), axis words and a feed, no G0/G1/G2/G3 -> this is a jog.
@@ -474,6 +500,16 @@ function detectLink(devPath) {
  */
 function onPendantLine(raw) {
     health.pendant.rxLines++;
+    // As in gcode, everything after a ";" is a comment: the firmware writes e.g. "\x18; Reset the machine". Only the
+    // part before it is the command. (A line that starts with ";" is a log entry, handled below.)
+    const semi = raw.indexOf(';');
+    if (semi > 0) {
+        const head = raw.slice(0, semi).trim();
+        if (head) {
+            log('pendant -> comment ignored:', raw.slice(semi + 1).trim());
+            raw = head;
+        }
+    }
     if (raw === '?') return sendStatus(true);
     // Grbl jog cancel: the raw byte 0x85 (also accepted as UTF-8, C2 85), or the text alias JOGCANCEL
     if (raw === '\x85' || raw === '\xc2\x85' || raw.toUpperCase() === 'JOGCANCEL') return cancelJog();
@@ -504,6 +540,13 @@ function onPendantLine(raw) {
     const upper = line.toUpperCase();
     if (upper === 'PING') return sendToPendant('PONG');
     if (upper === 'STATUS?') return sendStatus(true);
+    if (cfg.device.strictGcode !== false && !looksLikeGcode(line)) {
+        // Not gcode: most likely a log line that lost its ";" or a piece of one. Never hand it to the controller.
+        health.pendant.garbageLines++;
+        health.pendant.strayLines = (health.pendant.strayLines || 0) + 1;
+        addPendantLog('[not gcode, not sent] ' + line.replace(/[\x00-\x1f\x7f]/g, ''));
+        return;
+    }
     if (cfg.jog.translate && cfg.cncjs.controllerType === 'Grbl') {
         line = toJog(line);
     }
@@ -555,7 +598,11 @@ function fmtDist(d) {
  */
 function writeGcode(line) {
     const quiet = !cfg.jog.echo && /^\$J=/.test(line);
-    if (!(quiet ? sendCommand('gcode', line, { echo: false }) : sendCommand('gcode', line))) return false;
+    // "$X" as a gcode line would be dropped by CNCjs while the machine is in Alarm (its feeder refuses to send in Alarm
+    // mode); the "unlock" command writes it straight to the port, which is what the Unlock button does.
+    const sent = /^\$X$/i.test(line) ? sendCommand('unlock')
+        : quiet ? sendCommand('gcode', line, { echo: false }) : sendCommand('gcode', line);
+    if (!sent) return false;
     if (cfg.jog.maxInFlight > 0) {
         if (jog.inFlight === 0) jog.lastAck = Date.now();
         jog.inFlight++;
