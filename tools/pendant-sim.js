@@ -39,8 +39,8 @@ const { SerialPort } = require('serialport');
 // sample pendant reports for the 'w' key: charging, on battery, low battery warning, error, no battery data
 const HW_SAMPLES = [
     '[HW:bat=62,chg=1,eta=3900,st=ok]',
-    '[HW:bat=74,chg=0,eta=13200,st=ok]',
-    '[HW:bat=12,chg=0,eta=1500,st=warn]',
+    '(MSG, [HW:bat=74,chg=0,eta=13200,st=ok,heap=182340,stk=0])',
+    '(MSG, [HW:bat=12,chg=0,eta=1500,st=warn,heap=24300,stk=2])',
     '[HW:bat=58,chg=0,eta=10200,st=err]',
     '[HW:st=ok]'
 ];

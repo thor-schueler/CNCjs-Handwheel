@@ -64,3 +64,13 @@ export function eta(sec) {
   if (m < 60) return m + 'm';
   return Math.floor(m / 60) + 'h ' + String(m % 60).padStart(2, '0') + 'm';
 }
+
+/**
+ * Formats a size in bytes as kB (1024 bytes), e.g. 182340 -> "178 kB".
+ *
+ * @param {?number} bytes
+ * @returns {string}
+ */
+export function kib(bytes) {
+  return bytes === null || bytes === undefined ? '–' : Math.round(bytes / 1024) + ' kB';
+}

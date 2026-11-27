@@ -3,7 +3,7 @@ import Dial from './Dial';
 import PendantRow from './PendantRow';
 import { API_BASE, useBridge, linkState } from './bridge';
 import { DEBUG, useHostFullscreen, useHostHeight } from './host';
-import { ago, clock, coord, duration } from './format';
+import { ago, clock, coord, duration, kib } from './format';
 
 /** One "label value" row. */
 function Row({ label, children }) {
@@ -98,7 +98,7 @@ function Details({ status, log, age, machineState, logHeight, logRef }) {
           )}
           {sender.name && <Row label="Job">{sender.name} {sender.sent}/{sender.total}{sender.hold ? ' (hold)' : ''}</Row>}
         </Card>
-        <Card title="Handwheel">
+        <Card title="Connection">
           <Row label="Port">{pendant.path || '–'}</Row>
           {pendant.powerDetect && (
             <Row label="Power">{pendant.powered === true ? 'on' : pendant.powered === false ? 'switched off' : pendant.powerError ? 'unreadable' : 'checking…'}</Row>
@@ -107,6 +107,10 @@ function Details({ status, log, age, machineState, logHeight, logRef }) {
           <Row label="Last line in">{ago(age(pendant.lastRxAgeMs))}</Row>
           <Row label="Last line out">{ago(age(pendant.lastTxAgeMs))}</Row>
           <Row label="Lines in / out">{pendant.rxLines} / {pendant.txLines}</Row>
+        </Card>
+        <Card title="Handwheel">
+          {pendant.info && pendant.info.heap !== undefined && <Row label="Free heap">{kib(pendant.info.heap)}</Row>}
+          {pendant.info && pendant.info.stk !== undefined && <Row label="Stack warnings"><Num value={pendant.info.stk} kind="bad" /></Row>}
           <Row label="Reconnects"><Num value={pendant.reconnects} kind="bad" /></Row>
           <Row label="Errors"><Num value={pendant.errors} kind="bad" />{pendant.lastError ? <span className="bad"> – {pendant.lastError}</span> : null}</Row>
           <Row label="Dropped lines"><Num value={pendant.garbageLines} kind="bad" /></Row>

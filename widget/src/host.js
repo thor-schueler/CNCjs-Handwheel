@@ -6,7 +6,7 @@ const token = params.get('token');
 /** `?debug=1` shows the widget's own expand/collapse button. */
 export const DEBUG = params.get('debug') === '1';
 
-/** What CNCjs last told this page about its widget (the `props` of a `change` message); null = not told. */
+/** What CNCjs last told this page about its widget (see onMessage for the message shapes); null = not told. */
 const hostProps = { disabled: null, fullscreen: null, colorMode: null };
 const subscribers = new Set();
 let connected = false;
@@ -25,22 +25,35 @@ export function subscribeHostProps(fn) {
   return () => subscribers.delete(fn);
 }
 
-/** Takes the `props` of a CNCjs `change` message; unknown or mistyped fields are ignored. */
+/**
+ * Takes what a CNCjs message says about the widget. Three shapes exist, depending on the CNCjs version:
+ *  - `change` with `payload.props` ({disabled, fullscreen, colorMode}): the Custom widget `props` protocol;
+ *  - `widget:state` with the fields directly in `payload` (upstream cncjs master): currently just `fullscreen`;
+ *  - `change` with `payload.fullscreen` (cncjs between #1060 and #1069), and `widget:fullscreenchange` (same era).
+ * Unknown or mistyped fields are ignored, and a message without any known field (a plain port `change`) is not
+ * an update. A `change` also announces a new serial port, which is not this page's business.
+ */
 function onMessage(event) {
   const { token: t, action } = { ...event.data };
   if (event.source !== window.parent || (token && t !== token)) return; // not from CNCjs for this widget
-  // A `change` also announces a new serial port; only `payload.props` matters here, and an older CNCjs sends none.
-  const props = action && action.type === 'change' && action.payload && action.payload.props;
-  if (!props || typeof props !== 'object') return;
-  if (typeof props.disabled === 'boolean') hostProps.disabled = props.disabled;
-  if (typeof props.fullscreen === 'boolean') hostProps.fullscreen = props.fullscreen;
-  if (props.colorMode === 'light' || props.colorMode === 'dark') hostProps.colorMode = props.colorMode;
-  subscribers.forEach((fn) => fn(getHostProps()));
+  if (!action || !action.payload || typeof action.payload !== 'object') return;
+  let source = null;
+  if (action.type === 'change') {
+    source = action.payload.props && typeof action.payload.props === 'object' ? action.payload.props : action.payload;
+  } else if (action.type === 'widget:state' || action.type === 'widget:fullscreenchange') {
+    source = action.payload;
+  }
+  if (!source) return;
+  let updated = false;
+  if (typeof source.disabled === 'boolean') { hostProps.disabled = source.disabled; updated = true; }
+  if (typeof source.fullscreen === 'boolean') { hostProps.fullscreen = source.fullscreen; updated = true; }
+  if (source.colorMode === 'light' || source.colorMode === 'dark') { hostProps.colorMode = source.colorMode; updated = true; }
+  if (updated) subscribers.forEach((fn) => fn(getHostProps()));
 }
 
 /**
- * Handshake with CNCjs: starts listening, then asks once. CNCjs answers with a `change` message holding the
- * current props (full screen, colour mode, disabled). The listener must exist first: the answer can arrive
+ * Handshake with CNCjs: starts listening, then asks once. CNCjs answers with its current state (full screen, and with
+ * the `props` protocol colour mode and disabled). The listener must exist first: the answer can arrive
  * before the page has finished starting, and the earlier `change` messages are lost when the iframe is
  * created by the very update they describe. Call once; further calls do nothing.
  */
@@ -98,9 +111,9 @@ function watchParentFullscreen(onChange) {
 }
 
 /**
- * True while the CNCjs widget is shown full screen. CNCjs says so in the `fullscreen` prop of its `change`
- * messages. Against a CNCjs that does not (older than the Custom widget `props`) it falls back to watching the
- * CNCjs page (same origin only) and otherwise stays false. `?mode=full` forces it on, `?debug=1` adds an expand button.
+ * True while the CNCjs widget is shown full screen. CNCjs says so in a `widget:state` message (cncjs master) or in the
+ * `fullscreen` prop of its `change` messages (Custom widget `props`, see onMessage). Against a CNCjs that does neither
+ * it falls back to watching the CNCjs page (same origin only) and otherwise stays false. `?mode=full` forces it on, `?debug=1` adds an expand button.
  *
  * @returns {boolean}
  */
