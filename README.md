@@ -221,23 +221,30 @@ URL parameters (append them to the widget URL, e.g. `/handwheel/?theme=dark`):
 | `debug` | | `1` adds an expand/collapse button (normally the details show only while CNCjs shows the widget fullscreen) |
 | `poll` | `400` | how often the widget asks the bridge, in ms (at least 200) |
 
-**Messages from CNCjs.** The CNCjs Custom widget tells the page what state it is in: after the page's `connect`
-handshake, and whenever something changes, it sends a `change` message whose `payload.props` holds `fullscreen`,
-`colorMode` (`light` or `dark`) and `disabled`. The widget follows `fullscreen` (expands and collapses with CNCjs's
-own fullscreen button; its own expand button then hides) and `colorMode`, in every setup, same origin or not. Needs a
-CNCjs with that support (cncjs/cncjs, Custom widget `props`); against an older CNCjs the messages carry no `props`
-and the widget uses the fallbacks below.
+**Messages from CNCjs.** The CNCjs Custom widget tells the page what state it is in, after the page's `connect`
+handshake and whenever something changes. Which message depends on the CNCjs version, and the widget accepts all of them:
 
-**Colours.** Light or dark follows CNCjs's `colorMode`. Served from the same origin as CNCjs the widget also takes
+| CNCjs | message | carries |
+|---|---|---|
+| cncjs master (after #1069) | `widget:state` | `fullscreen` |
+| cncjs between #1060 and #1069 | `change` with `payload.fullscreen`, and `widget:fullscreenchange` | `fullscreen` |
+| a CNCjs with the Custom widget `props` (theRealThor's fork) | `change` with `payload.props` | `fullscreen`, `colorMode` (`light` or `dark`), `disabled` |
+
+The widget follows `fullscreen` (expands and collapses with CNCjs's own fullscreen button; its own expand button then
+hides) and, where sent, `colorMode`, in every setup, same origin or not. Unknown fields are ignored, and a plain port
+`change` is not treated as an update. Upstream cncjs does not send `colorMode` (yet), so there the colours come from
+the fallbacks below.
+
+**Colours.** Light or dark follows CNCjs's `colorMode` where CNCjs sends it. Served from the same origin as CNCjs the widget also takes
 its colours from CNCjs's own theme tokens (`--color-surface`, `--color-widget-header-bg`,
 `--color-status-danger-text`, ... see `widget/src/hostTheme.js` for the mapping) and follows a mode change live. CNCjs has no green
 token, so the OK green is the widget's own. Where it cannot read the page (cross-origin, such as the Vite dev server) or
-CNCjs lacks a token, the widget's own light and dark stylesheet applies. Without a `colorMode` message it reads
+CNCjs lacks a token, the widget's own light and dark stylesheet applies. Without a `colorMode` message (upstream cncjs) it reads
 `data-color-mode` off the CNCjs page (same origin only) and finally the OS preference; `?theme=` overrides all of it.
 
-**Fullscreen.** With the `fullscreen` prop above, the log pane takes the height that is left when it can read the
+**Fullscreen.** With the fullscreen state above, the log pane takes the height that is left when it can read the
 CNCjs page (same origin), so the CNCjs widget only scrolls when the screen is too short for the cards; elsewhere the
-log keeps its default height. Against a CNCjs without the prop, a same-origin widget watches the CSS class CNCjs puts
+log keeps its default height. Against a CNCjs that sends no fullscreen state, a same-origin widget watches the CSS class CNCjs puts
 on a fullscreen widget (a CNCjs refactor can break that; the widget then just keeps its own expand button), and a
 cross-origin one (the Vite dev server) needs the expand button or `?mode=full`.
 
@@ -262,7 +269,7 @@ Pendant to bridge:
 | `?` or `STATUS?` | immediate status line |
 | `PING` | answered with `PONG` |
 | `; text` | console log entry for the widget; never sent to the controller |
-| `[HW:bat=74,chg=0,eta=13200,st=ok]` | the pendant's own state for the widget, never sent to the controller. `bat` battery 0-100 %, `chg` 1 while charging, `eta` seconds until full (charging) or empty, `st` `ok`, `warn` or `err` (the widget then says "Check log"). Every key is optional (a key left out counts as unknown), unknown keys are ignored. Send it when something changes and at least every 30 s; it is dropped when the pendant disconnects |
+| `[HW:bat=74,chg=0,eta=13200,st=ok,heap=182340,stk=0]` or `(MSG, [HW:...])` | the pendant's own state for the widget, never sent to the controller. The second spelling is a gcode message comment, which a controller reached directly ignores. `bat` battery 0-100 %, `chg` 1 while charging, `eta` seconds until full (charging) or empty, `st` `ok`, `warn` or `err` (the widget then says "Check log"), `heap` free heap memory in bytes, `stk` number of tasks that came close to using up their stack (the last two show in the widget's details). All values are whole numbers; a value that is not valid is ignored. Every key is optional (a key left out counts as unknown), unknown keys are ignored. Send it when something changes and at least every 30 s; it is dropped when the pendant disconnects |
 
 Bridge to pendant:
 

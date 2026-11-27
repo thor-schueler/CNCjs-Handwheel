@@ -452,15 +452,18 @@ function dropLine(raw) {
 }
 
 /**
- * Parses the pendant's own status report `[HW:bat=74,chg=0,eta=13200,st=ok]` and stores it for /status.
- * Keys: bat 0-100 (%), chg 1 while charging, eta seconds to full (charging) or empty, st ok|warn|err.
+ * Parses the pendant's own status report and stores it for /status. Two spellings are accepted:
+ * `[HW:bat=74,chg=0,eta=13200,st=ok]` and the same wrapped in a gcode message comment,
+ * `(MSG, [HW:bat=74,...])`, which a controller reached directly ignores (and may echo as a message).
+ * Keys (integers only): bat 0-100 (%), chg 1 while charging, eta seconds to full (charging) or empty,
+ * st ok|warn|err, heap free heap memory in bytes, stk number of tasks close to using up their stack.
  * All are optional and unknown keys are ignored, so the firmware can grow. Never sent to the controller.
  *
  * @param {string} line - trimmed line from the pendant
  * @returns {boolean} true if the line was a pendant status report (valid or not)
  */
 function parsePendantReport(line) {
-    const m = /^\[HW:([^\]]*)\]$/.exec(line);
+    const m = /^\[HW:([^\]]*)\]$/.exec(line) || /^\(\s*MSG\s*,\s*\[HW:([^\]]*)\]\s*\)$/i.exec(line);
     if (!m) return false;
     const info = {}; // each report replaces the last one: a key that is left out is unknown, not unchanged
     m[1].split(',').forEach((pair) => {
@@ -470,6 +473,8 @@ function parsePendantReport(line) {
         else if (k === 'chg' && (v === '0' || v === '1')) info.chg = v === '1';
         else if (k === 'eta' && num !== null) info.eta = num;
         else if (k === 'st' && /^(ok|warn|err)$/.test(v)) info.st = v;
+        else if (k === 'heap' && num !== null) info.heap = num;
+        else if (k === 'stk' && num !== null) info.stk = num;
     });
     info.at = Date.now();
     health.pendant.info = info;
