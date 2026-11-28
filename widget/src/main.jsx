@@ -1,7 +1,7 @@
 import { Component, StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 import App from './App';
-import { connectToHost, followHostColorMode, forcedTheme, reportSize } from './host';
+import { connectToHost, followColorScheme, forcedTheme, reportSize } from './host';
 import adoptHostTheme from './hostTheme';
 import './styles.css';
 
@@ -21,8 +21,9 @@ class ErrorBoundary extends Component {
   }
 }
 
-// Light or dark as CNCjs reports it (any origin); the colours themselves come from CNCjs when it is the same origin.
-followHostColorMode();
+// Light or dark follows the CNCjs colour scheme through prefers-color-scheme (any origin); the colours themselves
+// come from CNCjs when it is the same origin.
+followColorScheme();
 if (!forcedTheme) adoptHostTheme();
 // Inside CNCjs the iframe is sized to its content, so it never needs a scroll bar of its own.
 if (window.parent !== window) document.documentElement.classList.add('embedded');
