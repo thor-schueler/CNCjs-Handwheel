@@ -131,6 +131,7 @@ Start from `cncjs-handwheel.config.example.json`.
 | `device.hupcl`, `dtr`, `rts` | modem control line handling (the defaults are fine with the udev rule) |
 | `device.power` | `{line, poweredWhen, pollMs, debounceMs}`: detect that the handwheel is switched off while the USB cable is still plugged in, see "Detecting a switched-off handwheel". Off unless `line` is set |
 | `status.intervalMs`, `status.minGapMs` | status line at least every 400 ms (the heartbeat), and never more often than every 350 ms (about 3 per second); a burst of commands or position changes costs one line per gap, always carrying the latest values. Explicit `?` / `STATUS?` requests are answered at once |
+| `health.windowMs` | the counters in the widget header (reconnects, errors, dropped) count the last this many ms (default 900000 = 15 minutes, at least one minute), so they return to zero after a quiet period. `/status` carries both these as `recent` and the totals since the bridge started |
 | `status.pollAfterCommand` | ask Grbl for a fresh report after pendant commands (at most one per `status.minGapMs`) |
 | `status.format` | `grbl` or `json` |
 | `jog.translate` | rewrite jogs like `G21G91X10F500` to `$J=...` so they do not leave Grbl in relative mode (default `true`; `false` or `--no-jog-translate` sends the pendant's lines as plain gcode, for comparing behavior) |

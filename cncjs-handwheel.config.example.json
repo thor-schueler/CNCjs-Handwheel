@@ -22,6 +22,7 @@
     "rts": null,
     "power": { "line": null, "poweredWhen": "clear", "pollMs": 250, "debounceMs": 1000 }
   },
+  "health": { "windowMs": 900000 },
   "status": {
     "format": "grbl",
     "intervalMs": 400,

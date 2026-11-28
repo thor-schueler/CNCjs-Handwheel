@@ -67,6 +67,9 @@ const DEFAULTS = {
         //   debounceMs: a change must last this long before it counts (opening the port can reset the ESP32)
         power: { line: null, poweredWhen: 'clear', pollMs: 250, debounceMs: 1000 }
     },
+    health: {
+        windowMs: 900000           // the counters in the widget header (reconnects, errors, dropped) cover this long; /status also keeps lifetime totals
+    },
     status: {
         format: 'grbl',            // 'grbl' -> <Idle|MPos:..|WPos:..|FS:..>   'json' -> {"t":"status",...}
         intervalMs: 400,           // unsolicited status line at least this often (also the pendant's "host alive" signal)
@@ -207,6 +210,43 @@ const health = {
     lastCommand: null
 };
 
+/** Timestamps of recent events per counter; the lifetime totals live in `health`, these feed the rolling window. */
+const recentEvents = { reconnects: [], errors: [], garbageLines: [], droppedCommands: [] };
+const MAX_RECENT_EVENTS = 1000;
+
+/**
+ * Remembers that an event happened now, for the rolling counters in the status report. Old entries are dropped,
+ * and so are the oldest ones beyond MAX_RECENT_EVENTS (a flood cannot grow the list without bound).
+ *
+ * @param {string} kind - a key of recentEvents
+ * @returns {void}
+ */
+function noteEvent(kind) {
+    const list = recentEvents[kind];
+    const now = Date.now();
+    list.push(now);
+    const from = now - windowMs();
+    while (list.length && (list[0] < from || list.length > MAX_RECENT_EVENTS)) list.shift();
+}
+
+/**
+ * @returns {number} the length of the rolling window in ms (health.windowMs, at least one minute)
+ */
+function windowMs() {
+    return Math.max(60000, Number(cfg.health && cfg.health.windowMs) || 900000);
+}
+
+/**
+ * Counts the events of one kind inside the rolling window.
+ *
+ * @param {string} kind - a key of recentEvents
+ * @returns {number}
+ */
+function recentCount(kind) {
+    const from = Date.now() - windowMs();
+    return recentEvents[kind].filter((t) => t >= from).length;
+}
+
 /**
  * Logs to the console, but only when -v / verbose is on.
  *
@@ -269,6 +309,7 @@ let lastDropWarn = 0;
 const fmtArgs = (args) => args.map((a) => (a !== null && typeof a === 'object' ? JSON.stringify(a) : a));
 function noteDropped(name, args) {
     health.cncjs.droppedCommands++;
+    noteEvent('droppedCommands');
     const now = Date.now();
     if (now - lastDropWarn < 1000) return;
     lastDropWarn = now;
@@ -390,7 +431,7 @@ function onPendantData(buf) {
             const drop = skipLine;
             rxBuf = '';
             skipLine = false;
-            if (drop) health.pendant.garbageLines++;
+            if (drop) { health.pendant.garbageLines++; noteEvent('garbageLines'); }
             else if (line) onPendantLine(line);
         } else if (rxBuf.length < 256) {
             rxBuf += ch;
@@ -444,6 +485,7 @@ let lastDropLog = 0;
  */
 function dropLine(raw) {
     health.pendant.garbageLines++;
+    noteEvent('garbageLines');
     const now = Date.now();
     if (cfg.verbose && now - lastDropLog > 1000) {
         lastDropLog = now;
@@ -548,6 +590,7 @@ function onPendantLine(raw) {
     if (cfg.device.strictGcode !== false && !looksLikeGcode(line)) {
         // Not gcode: most likely a log line that lost its ";" or a piece of one. Never hand it to the controller.
         health.pendant.garbageLines++;
+        noteEvent('garbageLines');
         health.pendant.strayLines = (health.pendant.strayLines || 0) + 1;
         addPendantLog('[not gcode, not sent] ' + line.replace(/[\x00-\x1f\x7f]/g, ''));
         return;
@@ -915,6 +958,7 @@ let reconnectTimer = null;
  */
 function noteError(err) {
     health.pendant.errors++;
+    noteEvent('errors');
     health.pendant.lastError = err.message;
     console.error('Pendant error:', err.message);
 }
@@ -929,6 +973,7 @@ function scheduleReconnect() {
     reconnectTimer = setTimeout(() => {
         reconnectTimer = null;
         health.pendant.reconnects++;
+        noteEvent('reconnects');
         openPendant();
     }, cfg.device.reconnectMs);
 }
@@ -1042,6 +1087,7 @@ function openPendant() {
     port.on('close', () => {
         health.pendant.connected = false;
         health.pendant.info = null; // a stale battery level is worse than none
+        discardHeldJog();           // a jog held back for a handwheel that is gone must not fire later
         stopPowerWatch();
         if (!shuttingDown) console.log('Pendant port closed');
         scheduleReconnect();
@@ -1089,6 +1135,15 @@ function healthReport() {
             lastTxAgeMs: age(health.pendant.lastTx),
             info: health.pendant.info && Object.assign({}, health.pendant.info, { ageMs: age(health.pendant.info.at) }) }),
         cncjs: health.cncjs,
+        // The same counters over the last windowMs only (they age out by themselves); the totals above count since the bridge started.
+        recent: {
+            windowMs: windowMs(),
+            reconnects: recentCount('reconnects'),
+            errors: recentCount('errors'),
+            garbageLines: recentCount('garbageLines'),
+            droppedCommands: recentCount('droppedCommands'),
+            lastError: recentCount('errors') > 0 ? health.pendant.lastError : null
+        },
         jog: Object.assign({}, health.jog, { lastAgeMs: age(health.jog.lastAt) }),
         lastCommand: health.lastCommand,
         status: snapshot()
