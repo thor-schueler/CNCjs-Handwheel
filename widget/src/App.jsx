@@ -34,6 +34,20 @@ function Num({ value, kind = 'plain' }) {
   return <b className={cls}>{value === undefined || value === null ? '–' : value}</b>;
 }
 
+/**
+ * A counter over the bridge's rolling window, with the total since the bridge started in brackets when it differs:
+ * "0 (12 total)". Red only while the windowed count is not zero. Without a window (older bridge) it is the total alone.
+ */
+function Windowed({ recent, total, windowMs }) {
+  const showTotal = windowMs !== undefined && total !== undefined && total !== recent;
+  return (
+    <>
+      <Num value={recent} kind="bad" />
+      {showTotal && <small title={'last ' + duration(windowMs) + ' / since the bridge started'}> ({total} total)</small>}
+    </>
+  );
+}
+
 /** Joins counters as 1|2|3; each item is `[value, kind]`. */
 function Bar({ items }) {
   return items.map(([v, kind], i) => (
@@ -82,6 +96,9 @@ function Log({ entries, height, boxRef, emptyNote }) {
 function Details({ status, log, age, machineState, logHeight, logRef }) {
   // Everything but the link state is optional: older bridge versions report fewer fields.
   const { pendant = {}, cncjs = {}, jog, lastCommand } = status;
+  // The bridge reports the counters over a rolling window next to the totals; an older one only has the totals.
+  const recent = status.recent || { reconnects: pendant.reconnects, errors: pendant.errors, garbageLines: pendant.garbageLines,
+    lastError: pendant.lastError };
   const s = status.status || {};
   const sender = s.sender || {};
   const wpos = s.wpos;
@@ -111,9 +128,12 @@ function Details({ status, log, age, machineState, logHeight, logRef }) {
         <Card title="Handwheel">
           {pendant.info && pendant.info.heap !== undefined && <Row label="Free heap">{kib(pendant.info.heap)}</Row>}
           {pendant.info && pendant.info.stk !== undefined && <Row label="Stack warnings"><Num value={pendant.info.stk} kind="bad" /></Row>}
-          <Row label="Reconnects"><Num value={pendant.reconnects} kind="bad" /></Row>
-          <Row label="Errors"><Num value={pendant.errors} kind="bad" />{pendant.lastError ? <span className="bad"> – {pendant.lastError}</span> : null}</Row>
-          <Row label="Dropped lines"><Num value={pendant.garbageLines} kind="bad" /></Row>
+          <Row label="Reconnects"><Windowed recent={recent.reconnects} total={pendant.reconnects} windowMs={recent.windowMs} /></Row>
+          <Row label="Errors">
+            <Windowed recent={recent.errors} total={pendant.errors} windowMs={recent.windowMs} />
+            {recent.lastError ? <span className="bad"> – {recent.lastError}</span> : null}
+          </Row>
+          <Row label="Dropped lines"><Windowed recent={recent.garbageLines} total={pendant.garbageLines} windowMs={recent.windowMs} /></Row>
           {pendant.sendEnabled !== undefined && <Row label="Status to pendant">{pendant.sendEnabled ? 'on' : 'off'}</Row>}
         </Card>
         <Card title="CNCjs">
@@ -166,14 +186,20 @@ export default function App() {
     || (status.jog.lastAgeMs !== null && status.jog.lastAgeMs !== undefined && age(status.jog.lastAgeMs) < JOG_HOLD_MS))) {
     machineState = 'Jog';
   }
-  // "Drop" adds the pendant lines the bridge could not use and the commands it could not hand to CNCjs.
+  // "Drop" adds the pendant lines the bridge could not use and the commands it could not hand to CNCjs. These are
+  // the counts over the bridge's rolling window (they age out); an older bridge only has the totals.
+  const r = status && status.recent;
   const counts = status && status.pendant
-    ? [status.pendant.reconnects || 0, status.pendant.errors || 0,
-      (status.pendant.garbageLines || 0) + ((status.cncjs && status.cncjs.droppedCommands) || 0)]
+    ? (r
+      ? [r.reconnects || 0, r.errors || 0, (r.garbageLines || 0) + (r.droppedCommands || 0)]
+      : [status.pendant.reconnects || 0, status.pendant.errors || 0,
+        (status.pendant.garbageLines || 0) + ((status.cncjs && status.cncjs.droppedCommands) || 0)])
     : null;
 
-  // The counters only mean something while the controller is there: CNCjs reachable and the machine port open.
-  const live = !!(status && status.cncjs && status.cncjs.socketConnected && status.cncjs.portOpen);
+  // The counters only mean something while the controller is there (CNCjs reachable, machine port open) and the
+  // handwheel is: plugged in and not switched off. Without the wheel there is nothing to count or to hold back.
+  const wheel = !!(status && status.pendant && status.pendant.connected && status.pendant.powered !== false);
+  const live = wheel && !!(status && status.cncjs && status.cncjs.socketConnected && status.cncjs.portOpen);
 
   // Full screen: the iframe is exactly as tall as its content, so a log of fixed height makes the CNCjs widget
   // scroll whenever the screen is shorter than the content, and leaves empty space when it is taller. Make the

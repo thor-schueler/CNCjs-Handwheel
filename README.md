@@ -131,6 +131,7 @@ Start from `cncjs-handwheel.config.example.json`.
 | `device.hupcl`, `dtr`, `rts` | modem control line handling (the defaults are fine with the udev rule) |
 | `device.power` | `{line, poweredWhen, pollMs, debounceMs}`: detect that the handwheel is switched off while the USB cable is still plugged in, see "Detecting a switched-off handwheel". Off unless `line` is set |
 | `status.intervalMs`, `status.minGapMs` | status line at least every 400 ms (the heartbeat), and never more often than every 350 ms (about 3 per second); a burst of commands or position changes costs one line per gap, always carrying the latest values. Explicit `?` / `STATUS?` requests are answered at once |
+| `health.windowMs` | the counters in the widget header (reconnects, errors, dropped) count the last this many ms (default 900000 = 15 minutes, at least one minute), so they return to zero after a quiet period. `/status` carries both these as `recent` and the totals since the bridge started |
 | `status.pollAfterCommand` | ask Grbl for a fresh report after pendant commands (at most one per `status.minGapMs`) |
 | `status.format` | `grbl` or `json` |
 | `jog.translate` | rewrite jogs like `G21G91X10F500` to `$J=...` so they do not leave Grbl in relative mode (default `true`; `false` or `--no-jog-translate` sends the pendant's lines as plain gcode, for comparing behavior) |
@@ -228,19 +229,20 @@ handshake and whenever something changes. Which message depends on the CNCjs ver
 |---|---|---|
 | cncjs master (after #1069) | `widget:state` | `fullscreen` |
 | cncjs between #1060 and #1069 | `change` with `payload.fullscreen`, and `widget:fullscreenchange` | `fullscreen` |
-| a CNCjs with the Custom widget `props` (theRealThor's fork) | `change` with `payload.props` | `fullscreen`, `colorMode` (`light` or `dark`), `disabled` |
+| an earlier fork-only build of the Custom widget | `change` with `payload.props` | `fullscreen`, `disabled` (a `colorMode` in it is ignored) |
 
 The widget follows `fullscreen` (expands and collapses with CNCjs's own fullscreen button; its own expand button then
-hides) and, where sent, `colorMode`, in every setup, same origin or not. Unknown fields are ignored, and a plain port
-`change` is not treated as an update. Upstream cncjs does not send `colorMode` (yet), so there the colours come from
-the fallbacks below.
+hides) in every setup, same origin or not. Unknown fields are ignored, and a plain port `change` is not treated as an
+update. There is no colour message: see below.
 
-**Colours.** Light or dark follows CNCjs's `colorMode` where CNCjs sends it. Served from the same origin as CNCjs the widget also takes
+**Colours.** Light or dark follows CNCjs through the `prefers-color-scheme` media query. CNCjs sets `color-scheme: light` or
+`dark` on its root element, the browser passes that on to the iframe, and the widget follows the query live, also across
+origins (Chrome, Edge, Firefox; Safari only since 2026, older Safari reports the OS preference). Served from the same origin as CNCjs the widget also takes
 its colours from CNCjs's own theme tokens (`--color-surface`, `--color-widget-header-bg`,
 `--color-status-danger-text`, ... see `widget/src/hostTheme.js` for the mapping) and follows a mode change live. CNCjs has no green
 token, so the OK green is the widget's own. Where it cannot read the page (cross-origin, such as the Vite dev server) or
-CNCjs lacks a token, the widget's own light and dark stylesheet applies. Without a `colorMode` message (upstream cncjs) it reads
-`data-color-mode` off the CNCjs page (same origin only) and finally the OS preference; `?theme=` overrides all of it.
+CNCjs lacks a token, the widget's own light and dark stylesheet applies. Same origin, it also reads `data-color-mode` off the
+CNCjs page, which beats the media query where the browser does not pass the scheme on; `?theme=` overrides all of it.
 
 **Fullscreen.** With the fullscreen state above, the log pane takes the height that is left when it can read the
 CNCjs page (same origin), so the CNCjs widget only scrolls when the screen is too short for the cards; elsewhere the

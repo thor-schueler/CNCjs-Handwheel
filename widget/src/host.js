@@ -7,11 +7,11 @@ const token = params.get('token');
 export const DEBUG = params.get('debug') === '1';
 
 /** What CNCjs last told this page about its widget (see onMessage for the message shapes); null = not told. */
-const hostProps = { disabled: null, fullscreen: null, colorMode: null };
+const hostProps = { disabled: null, fullscreen: null };
 const subscribers = new Set();
 let connected = false;
 
-/** @returns {{disabled: ?boolean, fullscreen: ?boolean, colorMode: ?('light'|'dark')}} a copy of what CNCjs reported */
+/** @returns {{disabled: ?boolean, fullscreen: ?boolean}} a copy of what CNCjs reported */
 export const getHostProps = () => ({ ...hostProps });
 
 /**
@@ -27,7 +27,7 @@ export function subscribeHostProps(fn) {
 
 /**
  * Takes what a CNCjs message says about the widget. Three shapes exist, depending on the CNCjs version:
- *  - `change` with `payload.props` ({disabled, fullscreen, colorMode}): the Custom widget `props` protocol;
+ *  - `change` with `payload.props` ({disabled, fullscreen}): the earlier fork-only `props` protocol (a `colorMode` in it is ignored);
  *  - `widget:state` with the fields directly in `payload` (upstream cncjs master): currently just `fullscreen`;
  *  - `change` with `payload.fullscreen` (cncjs between #1060 and #1069), and `widget:fullscreenchange` (same era).
  * Unknown or mistyped fields are ignored, and a message without any known field (a plain port `change`) is not
@@ -47,13 +47,11 @@ function onMessage(event) {
   let updated = false;
   if (typeof source.disabled === 'boolean') { hostProps.disabled = source.disabled; updated = true; }
   if (typeof source.fullscreen === 'boolean') { hostProps.fullscreen = source.fullscreen; updated = true; }
-  if (source.colorMode === 'light' || source.colorMode === 'dark') { hostProps.colorMode = source.colorMode; updated = true; }
   if (updated) subscribers.forEach((fn) => fn(getHostProps()));
 }
 
 /**
- * Handshake with CNCjs: starts listening, then asks once. CNCjs answers with its current state (full screen, and with
- * the `props` protocol colour mode and disabled). The listener must exist first: the answer can arrive
+ * Handshake with CNCjs: starts listening, then asks once. CNCjs answers with its current state (full screen). The listener must exist first: the answer can arrive
  * before the page has finished starting, and the earlier `change` messages are lost when the iframe is
  * created by the very update they describe. Call once; further calls do nothing.
  */
@@ -165,30 +163,41 @@ export function useHostHeight(active) {
   return height;
 }
 
-/** `?theme=light|dark`, or null: an explicit choice that also turns off following the CNCjs theme. */
+/** `?theme=light|dark`, or null: an explicit choice that also turns off following CNCjs. */
 export const forcedTheme = ['light', 'dark'].includes(params.get('theme')) ? params.get('theme') : null;
 
+/** The colour mode read off the CNCjs page itself (same origin only), or null; see setPageColorMode. */
+let pageColorMode = null;
+let applyColorMode = () => {};
+
 /**
- * The colour mode to start with, before CNCjs has said which it is: `?theme=` or else the OS preference.
+ * Tells the theme follower what the CNCjs page itself says its colour mode is. Only a same-origin widget can read
+ * that (hostTheme.js does); it is exact where the browser does not pass the CNCjs colour scheme on to the
+ * iframe (Safari before 2026), so it wins over the media query.
  *
- * @returns {'light'|'dark'}
+ * @param {?('light'|'dark')} mode - the mode, or null when the page cannot be read
  */
-export function initialTheme() {
-  if (forcedTheme) return forcedTheme;
-  return window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+export function setPageColorMode(mode) {
+  pageColorMode = mode === 'light' || mode === 'dark' ? mode : null;
+  applyColorMode();
 }
 
 /**
- * Keeps `data-theme` on <html> at the colour mode CNCjs reports (its `colorMode` prop, which works across
- * origins). `?theme=` stays in charge when given.
+ * Keeps `data-theme` on <html> at the colour mode CNCjs is in. CNCjs sets `color-scheme: light|dark` on its root
+ * element, the browser hands that to the iframe element, and the page inside sees it as `prefers-color-scheme`,
+ * also across origins (Chrome, Edge, Firefox). So the media query is the source, and it is followed live.
+ * Precedence: `?theme=`, then the CNCjs page itself (setPageColorMode), then the media query.
  *
  * @returns {function(): void} stops following
  */
-export function followHostColorMode() {
+export function followColorScheme() {
   const root = document.documentElement;
-  root.dataset.theme = initialTheme();
-  if (forcedTheme) return () => {};
-  const apply = (p) => { if (p.colorMode) root.dataset.theme = p.colorMode; };
-  apply(getHostProps());
-  return subscribeHostProps(apply);
+  const mq = window.matchMedia ? window.matchMedia('(prefers-color-scheme: dark)') : null;
+  applyColorMode = () => {
+    root.dataset.theme = forcedTheme || pageColorMode || (mq && mq.matches ? 'dark' : 'light');
+  };
+  applyColorMode();
+  if (forcedTheme || !mq) return () => {};
+  mq.addEventListener('change', applyColorMode);
+  return () => mq.removeEventListener('change', applyColorMode);
 }
