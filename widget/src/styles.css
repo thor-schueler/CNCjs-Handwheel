@@ -61,7 +61,7 @@ code, .mono { font-family: "Segoe UI Mono", "SFMono-Medium", "SF Mono", Menlo, C
 }
 .toggle:focus-visible { outline: 2px solid var(--focus, var(--accent)); outline-offset: 1px; }
 
-.cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 8px; margin-top: 8px; }
+.cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 8px; margin-top: 8px; }
 .card { background: var(--bg); border: 1px solid var(--head-border); }
 /* header like a CNCjs widget header */
 .card h3 { margin: 0; padding: 0 10px; font-size: 14px; font-weight: 400; line-height: 32px; background: var(--head-bg); color: var(--head-fg); border-bottom: 1px solid var(--head-border); }
